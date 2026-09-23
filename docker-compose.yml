@@ -1,0 +1,227 @@
+# EdAgent - 本地化 AI Agent 编排（Windows / WSL2 / Docker Desktop）
+# 独立性：项目名 edagent，独立网络 edagent_net，容器名/卷统一前缀
+# 端口：全部仅绑定 127.0.0.1 且已避让宿主机占用端口（80/443/6379/11434 等）
+name: edagent
+
+services:
+  ollama:
+    image: ollama/ollama:0.32.3
+    container_name: edagent-ollama
+    ports:
+      - "127.0.0.1:${OLLAMA_HOST_PORT:-11534}:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    environment:
+      OLLAMA_KEEP_ALIVE: "24h"
+      # 供启动脚本自动拉取模型使用
+      LLM_MODEL: ${LLM_MODEL:-deepseek-r1:8b}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+    # 官方镜像 ENTRYPOINT 是 /bin/ollama，这里覆盖为 sh 以运行自定义启动脚本：
+    # 前台运行 serve，后台自动拉取 LLM 与 embedding 模型（不阻塞健康检查）
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -e
+        ollama serve &
+        SRV_PID=$$!
+        until ollama list >/dev/null 2>&1; do sleep 2; done
+        echo "[edagent-ollama] 开始后台拉取模型: $${LLM_MODEL}, $${EMBEDDING_MODEL}"
+        ( ollama pull "$${LLM_MODEL}"; ollama pull "$${EMBEDDING_MODEL}"; \
+          echo "[edagent-ollama] 模型拉取完成" ) &
+        wait $$SRV_PID
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    restart: unless-stopped
+
+  chromadb:
+    image: chromadb/chroma:1.5.9
+    container_name: edagent-chromadb
+    ports:
+      - "127.0.0.1:${CHROMA_HOST_PORT:-18000}:8000"
+    volumes:
+      # chromadb 1.5.x 默认数据目录为 /data（旧版 /chroma/chroma 已废弃）
+      - chroma_data:/data
+    environment:
+      # 1.5.x 自托管默认即关闭遥测，保留显式声明便于审计
+      ANONYMIZED_TELEMETRY: "FALSE"
+    healthcheck:
+      # 1.5.x 镜像不含 python/curl/wget，使用 bash 内建 /dev/tcp 探活
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/8000' || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: edagent-postgres
+    ports:
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-15432}:5432"
+    volumes:
+      - pg_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: ai_agent
+      POSTGRES_USER: agent
+      POSTGRES_PASSWORD_FILE: /run/secrets/pg_password
+    secrets:
+      - pg_password
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U agent -d ai_agent"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: unless-stopped
+
+  redis:
+    image: redis:7.2-alpine
+    container_name: edagent-redis
+    ports:
+      - "127.0.0.1:${REDIS_HOST_PORT:-16379}:6379"
+    volumes:
+      - redis_data:/data
+    command: redis-server --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  agent-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: edagent-agent-api:0.1.0
+    container_name: edagent-agent-api
+    depends_on:
+      ollama:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:${AGENT_API_PORT:-18080}:8080"
+    volumes:
+      - ingest_data:/data/ingest
+    environment:
+      AGENT_LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
+      AGENT_LLM_API_KEY: ${LLM_API_KEY:-ollama}
+      AGENT_LLM_MODEL: ${LLM_MODEL:-deepseek-r1:8b}
+
+      AGENT_EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://ollama:11434/v1}
+      AGENT_EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-ollama}
+      AGENT_EMBEDDING_MODEL: ${EMBEDDING_MODEL:-nomic-embed-text}
+
+      AGENT_DATABASE_URL: postgresql://agent:${PG_PASSWORD}@postgres:5432/ai_agent
+      AGENT_REDIS_URL: redis://redis:6379/0
+      AGENT_CHROMA_URL: http://chromadb:8000
+      AGENT_COLLECTION_NAME: agent_edagent
+      AGENT_OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      AGENT_API_KEY: ${AGENT_API_KEY}
+      AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET}
+      AGENT_MAX_AGENT_STEPS: "15"
+      AGENT_ENV: production
+    restart: unless-stopped
+
+  nginx:
+    image: nginx:1.27-alpine
+    container_name: edagent-nginx
+    ports:
+      - "127.0.0.1:${NGINX_HOST_PORT:-18088}:80"
+    volumes:
+      - ./config/nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - agent-api
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.110.0
+    container_name: edagent-otel-collector
+    volumes:
+      - ./config/otel-collector.yaml:/etc/otelcol-contrib/config.yaml:ro
+    ports:
+      - "127.0.0.1:${OTEL_GRPC_HOST_PORT:-14317}:4317"
+      - "127.0.0.1:${OTEL_HTTP_HOST_PORT:-14318}:4318"
+    depends_on:
+      - jaeger
+    restart: unless-stopped
+
+  jaeger:
+    image: jaegertracing/jaeger:2.6.0
+    container_name: edagent-jaeger
+    # Jaeger v2 all-in-one 默认在 4317/4318 开启 OTLP 接收，无需额外参数
+    ports:
+      - "127.0.0.1:${JAEGER_UI_HOST_PORT:-16686}:16686"
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    container_name: edagent-prometheus
+    volumes:
+      - ./config/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prom_data:/prometheus
+    ports:
+      - "127.0.0.1:${PROMETHEUS_HOST_PORT:-19090}:9090"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9090/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana-oss:11.3.0
+    container_name: edagent-grafana
+    ports:
+      - "127.0.0.1:${GRAFANA_HOST_PORT:-13000}:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana-dashboards:ro
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD}
+      GF_USERS_DEFAULT_THEME: light
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+
+volumes:
+  ollama_data:
+    name: edagent_ollama_data
+  chroma_data:
+    name: edagent_chroma_data
+  pg_data:
+    name: edagent_pg_data
+  redis_data:
+    name: edagent_redis_data
+  ingest_data:
+    name: edagent_ingest_data
+  prom_data:
+    name: edagent_prom_data
+  grafana_data:
+    name: edagent_grafana_data
+
+secrets:
+  pg_password:
+    file: ./secrets/pg_password.txt
+
+networks:
+  default:
+    name: edagent_net

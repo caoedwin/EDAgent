@@ -1,0 +1,26 @@
+# 环境与密钥
+.env
+secrets/*.txt
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# uv
+# （uv.lock 建议提交，这里不忽略）
+
+# 数据与运行时
+data/ingest/*
+!data/ingest/.gitkeep
+*.log
+
+# IDE / OS
+.idea/
+.vscode/
+.DS_Store

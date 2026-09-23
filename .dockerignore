@@ -1,0 +1,17 @@
+.git
+.venv
+venv
+__pycache__
+*.pyc
+.env
+.env.example
+.pytest_cache
+.ruff_cache
+.mypy_cache
+data/ingest/*
+!data/ingest/.gitkeep
+traebackup
+.trae
+*.md
+frontend/node_modules
+frontend/dist
