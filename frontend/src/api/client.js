@@ -41,6 +41,33 @@ export const api = {
 }
 
 /**
+ * 文件下载：触发浏览器另存为，文件名优先取 Content-Disposition。
+ */
+export async function downloadFile(path) {
+  const res = await fetch(path, { credentials: 'same-origin' })
+  if (res.status === 401) {
+    window.dispatchEvent(new CustomEvent('ea:unauthorized'))
+    throw new Error('登录已失效，请重新登录')
+  }
+  if (!res.ok) throw new Error(`下载失败（HTTP ${res.status}）`)
+
+  const disposition = res.headers.get('content-disposition') || ''
+  const utf8 = /filename\*=UTF-8''([^;]+)/i.exec(disposition)
+  const plain = /filename="?([^";]+)"?/i.exec(disposition)
+  let name = 'export.md'
+  if (utf8) name = decodeURIComponent(utf8[1])
+  else if (plain) name = plain[1]
+
+  const url = URL.createObjectURL(await res.blob())
+  const link = document.createElement('a')
+  link.href = url
+  link.download = name
+  link.click()
+  URL.revokeObjectURL(url)
+  return name
+}
+
+/**
  * SSE 流式聊天（POST + ReadableStream 手动解析）。
  * handlers: { onMeta, onReasoning, onToken, onDone, onError }
  * 返回 AbortController，可调用 .abort() 停止生成。

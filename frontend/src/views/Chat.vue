@@ -7,6 +7,15 @@
           <img src="/favicon.svg" alt="logo" class="logo" />
           <span class="logo-text">EdAgent</span>
         </div>
+        <el-input
+          v-model="searchQuery"
+          placeholder="搜索会话…"
+          :prefix-icon="Search"
+          clearable
+          size="small"
+          class="search-input"
+          @input="onSearch"
+        />
         <el-button type="primary" class="new-chat-btn" :icon="Plus" @click="newConversation">
           新建对话
         </el-button>
@@ -17,11 +26,27 @@
           v-for="conv in conversations"
           :key="conv.id"
           class="conv-item"
-          :class="{ active: conv.id === currentId }"
+          :class="{ active: conv.id === currentId, pinned: conv.pinned }"
           @click="selectConversation(conv.id)"
         >
           <ChatDotRound class="conv-icon" />
           <span class="conv-title">{{ conv.title || '新会话' }}</span>
+          <Star
+            class="conv-pin"
+            :class="{ 'is-pinned': conv.pinned }"
+            :title="conv.pinned ? '取消置顶' : '置顶'"
+            @click.stop="togglePin(conv)"
+          />
+          <el-dropdown class="conv-del" trigger="click" @command="(cmd) => exportConversation(conv, cmd)" @click.stop>
+            <Download title="导出" @click.stop />
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item command="md">导出 Markdown</el-dropdown-item>
+                <el-dropdown-item command="html">导出 HTML</el-dropdown-item>
+                <el-dropdown-item command="pdf">打印为 PDF</el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
           <el-popconfirm title="删除该会话及其全部消息？" @confirm="deleteConversation(conv.id)">
             <template #reference>
               <Delete class="conv-del" @click.stop />
@@ -41,10 +66,12 @@
           <div class="side-link user-row">
             <el-avatar :size="28" class="user-avatar">{{ username.charAt(0).toUpperCase() }}</el-avatar>
             <span class="user-name">{{ username }}</span>
+            <el-tag v-if="auth.user?.role === 'admin'" size="small" type="warning" effect="light" round>管理员</el-tag>
             <ArrowDown />
           </div>
           <template #dropdown>
             <el-dropdown-menu>
+              <el-dropdown-item v-if="auth.user?.role === 'admin'" command="admin" :icon="Setting">管理后台</el-dropdown-item>
               <el-dropdown-item command="logout" :icon="SwitchButton">退出登录</el-dropdown-item>
             </el-dropdown-menu>
           </template>
@@ -176,12 +203,12 @@
           :auto-upload="true"
           :show-file-list="false"
           :http-request="uploadKbFile"
-          accept=".pdf,.md,.markdown,.txt,.html,.htm"
+          accept=".pdf,.docx,.xlsx,.pptx,.csv,.md,.markdown,.txt,.html,.htm"
         >
           <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
           <div class="el-upload__text">拖拽文件到此处，或<em>点击上传</em></div>
           <template #tip>
-            <div class="el-upload__tip">支持 PDF / Markdown / TXT / HTML，单个文件最大 50MB，仅本人可检索</div>
+            <div class="el-upload__tip">支持 PDF / Word / Excel / PPT / CSV / Markdown / TXT / HTML，单个文件最大 50MB，仅本人可检索</div>
           </template>
         </el-upload>
       </div>
@@ -216,9 +243,9 @@ import { ElMessage } from 'element-plus'
 import {
   Plus, Delete, ChatDotRound, ArrowDown, SwitchButton, FolderOpened,
   Promotion, VideoPause, Loading, ChatLineRound, DataAnalysis, Clock,
-  Tools, Document, UploadFilled,
+  Tools, Document, UploadFilled, Download, Setting, Search, Star,
 } from '@element-plus/icons-vue'
-import { api, streamChat } from '../api/client'
+import { api, downloadFile, streamChat } from '../api/client'
 import { useAuthStore } from '../stores/auth'
 
 marked.setOptions({ breaks: true, gfm: true })
@@ -235,12 +262,14 @@ const draft = ref('')
 const sending = ref(false)
 let abortController = null
 const msgScrollRef = ref()
+const searchQuery = ref('')
+let searchTimer = null
 
 const kbDrawer = ref(false)
 const kbStats = ref({ documents: 0 })
 const kbFiles = ref([])
 
-const routeMap = { simple: '直接回答', tool: '工具调用', rag: '知识库' }
+const routeMap = { simple: '直接回答', tool: '工具调用', rag: '知识库', team: '多Agent协作' }
 const toolNameMap = {
   calculator: '计算器',
   current_time: '当前时间',
@@ -284,8 +313,25 @@ async function scrollToBottom() {
 // ---------------- 会话管理 ----------------
 
 async function loadConversations() {
-  const data = await api.get('/api/v1/ui/conversations')
+  const params = searchQuery.value.trim()
+    ? `?q=${encodeURIComponent(searchQuery.value.trim())}`
+    : ''
+  const data = await api.get(`/api/v1/ui/conversations${params}`)
   conversations.value = data.items
+}
+
+function onSearch() {
+  clearTimeout(searchTimer)
+  searchTimer = setTimeout(loadConversations, 300)
+}
+
+async function togglePin(conv) {
+  try {
+    const result = await api.post(`/api/v1/ui/conversations/${conv.id}/pin`, {})
+    conv.pinned = result.pinned
+  } catch (err) {
+    ElMessage.error(err.message)
+  }
 }
 
 async function selectConversation(id) {
@@ -319,8 +365,26 @@ async function deleteConversation(id) {
   }
 }
 
+/** 导出会话（format: md / html / pdf） */
+async function exportConversation(conv, format = 'md') {
+  if (format === 'pdf') {
+    // PDF：打开 HTML 导出页面，由用户 Ctrl+P 打印为 PDF
+    const url = `/api/v1/ui/conversations/${conv.id}/export?format=html`
+    window.open(url, '_blank')
+    return
+  }
+  try {
+    const name = await downloadFile(`/api/v1/ui/conversations/${conv.id}/export?format=${format}`)
+    ElMessage.success(`已导出：${name}`)
+  } catch (err) {
+    ElMessage.error(err.message)
+  }
+}
+
 async function onUserCommand(command) {
-  if (command === 'logout') {
+  if (command === 'admin') {
+    router.push('/admin')
+  } else if (command === 'logout') {
     await auth.logout()
     router.push('/login')
   }
@@ -478,6 +542,10 @@ onMounted(async () => {
 .new-chat-btn {
   width: 100%;
 }
+.search-input {
+  width: 100%;
+  margin-bottom: 8px;
+}
 .conv-scroll {
   flex: 1;
   padding: 6px 8px;
@@ -521,6 +589,23 @@ onMounted(async () => {
 }
 .conv-del:hover {
   color: #f56c6c;
+}
+.conv-pin {
+  opacity: 0;
+  font-size: 14px;
+  color: #97a0b8;
+  transition: opacity 0.15s;
+  flex-shrink: 0;
+}
+.conv-pin.is-pinned {
+  opacity: 1;
+  color: #e6a23c;
+}
+.conv-item:hover .conv-pin {
+  opacity: 1;
+}
+.conv-item.pinned {
+  background: rgba(230, 162, 60, 0.08);
 }
 .sidebar-bottom {
   border-top: 1px solid #2a2e3d;

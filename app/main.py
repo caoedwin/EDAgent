@@ -21,6 +21,7 @@ from starlette.middleware.sessions import SessionMiddleware
 
 from app import __version__, db
 from app.agents.graph import build_agent_graph
+from app.api.admin_routes import router as admin_router
 from app.api.auth_routes import router as auth_router
 from app.api.routes import router as api_router
 from app.api.ui_routes import router as ui_router
@@ -133,6 +134,7 @@ init_tracing(app, settings.otel_exporter_otlp_endpoint, settings.otel_service_na
 app.include_router(api_router)
 app.include_router(auth_router)
 app.include_router(ui_router)
+app.include_router(admin_router)
 
 
 @app.exception_handler(LangChainException)

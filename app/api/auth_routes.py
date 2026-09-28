@@ -7,6 +7,7 @@ from pydantic import BaseModel, Field
 
 from app import db
 from app.security.web_auth import (
+    SESSION_ROLE_KEY,
     SESSION_USERNAME_KEY,
     SESSION_USER_KEY,
     require_login,
@@ -42,7 +43,8 @@ def register(payload: AuthRequest, request: Request) -> dict:
     # 注册成功直接建立会话，前端无需再跳登录
     request.session[SESSION_USER_KEY] = user["id"]
     request.session[SESSION_USERNAME_KEY] = user["username"]
-    return {"id": user["id"], "username": user["username"]}
+    request.session[SESSION_ROLE_KEY] = user.get("role", "user")
+    return {"id": user["id"], "username": user["username"], "role": user.get("role", "user")}
 
 
 @router.post("/login")
@@ -53,7 +55,8 @@ def login(payload: AuthRequest, request: Request) -> dict:
         raise HTTPException(status_code=401, detail=str(exc)) from exc
     request.session[SESSION_USER_KEY] = user["id"]
     request.session[SESSION_USERNAME_KEY] = user["username"]
-    return {"id": user["id"], "username": user["username"]}
+    request.session[SESSION_ROLE_KEY] = user.get("role", "user")
+    return {"id": user["id"], "username": user["username"], "role": user.get("role", "user")}
 
 
 @router.post("/logout")
@@ -64,4 +67,4 @@ def logout(request: Request) -> dict:
 
 @router.get("/me")
 async def me(user: dict = Depends(require_login)) -> dict:
-    return {"id": user["id"], "username": user["username"]}
+    return {"id": user["id"], "username": user["username"], "role": user.get("role", "user")}

@@ -35,11 +35,13 @@ ROUTER_PROMPT = """你是任务路由器。分析用户请求，判断处理路�
 - simple：常识问答、写作、翻译、总结、闲聊等，可直接由 LLM 回答
 - tool：需要精确数学计算、当前时间、字数统计等工具能力
 - rag：必须依赖本地私有知识库文档中的信息才能回答
+- team：复杂的多角度分析题（如方案对比、深度评估、需要拆解要点综合论述的问题），
+  交给"规划者-执行者-审稿者"多 Agent 协作小组处理；简单问题不要选它
 
 当前本地知识库文档分块数量：{kb_chunks}（数量为 0 时禁止选择 rag）。
 
 只输出一行 JSON，不要输出任何其他内容：
-{{"route": "simple|tool|rag", "reason": "一句话中文理由"}}"""
+{{"route": "simple|tool|rag|team", "reason": "一句话中文理由"}}"""
 
 
 def _last_user_question(state: AgentState) -> str:
@@ -60,7 +62,7 @@ def _parse_route(text: str) -> str:
         if not match:
             return "simple"
         route = json.loads(match.group(0)).get("route", "simple")
-        return route if route in {"simple", "tool", "rag"} else "simple"
+        return route if route in {"simple", "tool", "rag", "team"} else "simple"
     except Exception:
         return "simple"
 

@@ -72,7 +72,7 @@ async def run_agent(payload: AgentRequest, request: Request) -> AgentResponse:
 
 @router.post("/rag/documents", response_model=RagDocumentResponse, tags=["rag"])
 async def upload_document(request: Request, file: UploadFile = File(...)) -> RagDocumentResponse:
-    """上传 PDF / Markdown / TXT / HTML 文档并写入向量库。
+    """上传 PDF / Word / Excel / Markdown / TXT / HTML 文档并写入向量库。
 
     登录用户上传的文档仅本人可检索；Bearer API Key 上传的为全局共享文档。
     """

@@ -1,6 +1,6 @@
 """RAG 文档入库流水线。
 
-阶段：文档加载(PDF/Markdown/TXT/HTML) -> 语义分块(512/50) -> 向量化 -> ChromaDB 持久化。
+阶段：文档加载(PDF/DOCX/XLSX/Markdown/TXT/HTML) -> 语义分块(512/50) -> 向量化 -> ChromaDB 持久化。
 集合命名规范：agent_{project_name}（见 AGENT_COLLECTION_NAME=agent_edagent）。
 """
 
@@ -18,7 +18,7 @@ from pypdf import PdfReader
 from app.config import settings
 from app.llm.client import get_embedding_model
 
-SUPPORTED_SUFFIXES = {".pdf", ".md", ".markdown", ".txt", ".html", ".htm"}
+SUPPORTED_SUFFIXES = {".pdf", ".docx", ".xlsx", ".pptx", ".csv", ".md", ".markdown", ".txt", ".html", ".htm"}
 
 _splitter = RecursiveCharacterTextSplitter(
     chunk_size=settings.rag_chunk_size,
@@ -33,7 +33,7 @@ def get_chroma_client() -> ChromaHttpClient:
 
 
 def _load_pages(filename: str, content: bytes) -> list[tuple[str, int | None]]:
-    """读取文档，返回 [(页面文本, 页码)]；非 PDF 页码为 None。"""
+    """读取文档，返回 [(页面文本, 页码)]；PDF 页码为页序，XLSX 为工作表序，其余为 None。"""
     suffix = Path(filename).suffix.lower()
 
     if suffix == ".pdf":
@@ -44,6 +44,73 @@ def _load_pages(filename: str, content: bytes) -> list[tuple[str, int | None]]:
             if text:
                 pages.append((text, index))
         return pages
+
+    if suffix == ".docx":
+        from docx import Document as DocxDocument
+
+        doc = DocxDocument(io.BytesIO(content))
+        parts = [p.text.strip() for p in doc.paragraphs if p.text.strip()]
+        for table in doc.tables:  # 表格内容按行拼接，保留单元格边界
+            for row in table.rows:
+                cells = [cell.text.strip() for cell in row.cells]
+                if any(cells):
+                    parts.append(" | ".join(cells))
+        text = "\n".join(parts).strip()
+        return [(text, None)] if text else []
+
+    if suffix == ".xlsx":
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(io.BytesIO(content), read_only=True, data_only=True)
+        pages: list[tuple[str, int | None]] = []
+        try:
+            for index, sheet in enumerate(workbook.worksheets, start=1):
+                rows: list[str] = []
+                for row in sheet.iter_rows(values_only=True):
+                    cells = ["" if value is None else str(value).strip() for value in row]
+                    if any(cells):
+                        rows.append(" | ".join(cells).strip(" |"))
+                if rows:
+                    pages.append((f"[工作表: {sheet.title}]\n" + "\n".join(rows), index))
+        finally:
+            workbook.close()
+        return pages
+
+    if suffix == ".pptx":
+        from pptx import Presentation as PptxPresentation
+
+        prs = PptxPresentation(io.BytesIO(content))
+        pages: list[tuple[str, int | None]] = []
+        for index, slide in enumerate(prs.slides, start=1):
+            texts: list[str] = []
+            for shape in slide.shapes:
+                if shape.has_text_frame:
+                    for para in shape.text_frame.paragraphs:
+                        text = para.text.strip()
+                        if text:
+                            texts.append(text)
+                if shape.has_table:
+                    for row in shape.table.rows:
+                        cells = [cell.text.strip() for cell in row.cells]
+                        if any(cells):
+                            texts.append(" | ".join(cells))
+            text = "\n".join(texts).strip()
+            if text:
+                pages.append((text, index))
+        return pages
+
+    if suffix == ".csv":
+        import csv
+
+        raw_text = content.decode("utf-8", errors="ignore")
+        reader = csv.reader(io.StringIO(raw_text))
+        rows: list[str] = []
+        for row in reader:
+            cells = [cell.strip() for cell in row]
+            if any(cells):
+                rows.append(" | ".join(cells))
+        text = "\n".join(rows).strip()
+        return [(text, None)] if text else []
 
     raw = content.decode("utf-8", errors="ignore")
     if suffix in {".html", ".htm"}:

@@ -7,12 +7,13 @@
 
 import hmac
 
-from fastapi import HTTPException, Request
+from fastapi import Depends, HTTPException, Request
 
 from app.config import settings
 
 SESSION_USER_KEY = "user_id"
 SESSION_USERNAME_KEY = "username"
+SESSION_ROLE_KEY = "role"
 
 
 def session_user_id(request: Request) -> int | None:
@@ -52,4 +53,11 @@ async def require_login(request: Request) -> dict:
     if user is None:
         request.session.clear()
         raise HTTPException(status_code=401, detail="登录已失效，请重新登录")
+    return user
+
+
+async def require_admin(user: dict = Depends(require_login)) -> dict:
+    """FastAPI 依赖：管理端点必须 admin 角色（角色以数据库为准，防止旧 Cookie 越权）。"""
+    if user.get("role") != "admin":
+        raise HTTPException(status_code=403, detail="需要管理员权限")
     return user

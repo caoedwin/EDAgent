@@ -22,6 +22,12 @@ const router = createRouter({
       component: () => import('../views/Chat.vue'),
       meta: { requiresAuth: true },
     },
+    {
+      path: '/admin',
+      name: 'admin',
+      component: () => import('../views/Admin.vue'),
+      meta: { requiresAuth: true, requiresAdmin: true },
+    },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })
@@ -32,6 +38,9 @@ router.beforeEach(async (to) => {
 
   if (to.meta.requiresAuth && !auth.isLoggedIn) {
     return { name: 'login', query: { redirect: to.fullPath } }
+  }
+  if (to.meta.requiresAdmin && auth.user?.role !== 'admin') {
+    return { name: 'chat' }
   }
   if (to.meta.guestOnly && auth.isLoggedIn) {
     return { name: 'chat' }

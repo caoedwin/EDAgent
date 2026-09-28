@@ -6,10 +6,13 @@
 
 EdAgent 是一个基于 LangGraph 的本地 AI Agent，支持：
 
-- **智能路由**：自动判断简单问答 / 工具调用 / RAG 检索
-- **流式输出**：SSE 逐 token 打字机效果 + 思考过程展示
-- **用户系统**：注册 / 登录 / 会话历史持久化（Cookie Session）
-- **RAG 知识库**：按用户隔离的文档上传与检索（ChromaDB）
+- **智能路由**：自动判断简单问答 / 工具调用 / RAG 检索 / 多 Agent 协作（team）
+- **流式输出**：SSE 逐 token 打字机效果 + 思考过程展示 + 客户端中断即时取消（部分答案自动落库）
+- **用户系统**：注册 / 登录 / 会话历史持久化（Cookie Session）+ admin/user 角色 + 管理后台页面（前端 `/admin` 页面，用户列表/角色切换/删除）
+- **RAG 知识库**：按用户隔离的文档上传与检索（PDF/Word/Excel/PPTX/CSV/MD/TXT/HTML）
+- **多 Agent 协作**：「规划者 → 执行者 → 审稿者」子图处理复杂分析题（`MAX_TEAM_ROUNDS`、planner/reviewer 提示词可通过 `.env` 配置，默认 2 轮修订）
+- **会话置顶/搜索**：会话列表标题关键词模糊搜索 + 置顶排序
+- **会话导出**：一键导出会话为 Markdown / HTML（含路由/思考/来源/工具调用，可打印为 PDF）
 - **可观测性**：Prometheus 指标 + OpenTelemetry/Jaeger 链路追踪
 - **双通道鉴权**：Web UI 走 Cookie Session，API 脚本走 Bearer API Key
 
@@ -48,21 +51,23 @@ EdAgent/
 ├── app/                          # 后端 Python 应用
 │   ├── main.py                   #    FastAPI 入口（lifespan/中间件/路由/SPA 托管）
 │   ├── config.py                 #    统一配置（Settings 类，AGENT_ 前缀环境变量）
-│   ├── db.py                     #    业务数据库（pg 连接池 + 建表 + CRUD）
+│   ├── db.py                     #    业务数据库（pg 连接池 + 建表 + CRUD + 角色管理）
 │   ├── api/
 │   │   ├── routes.py             #    API 路由（/chat /agent /rag/*）
 │   │   ├── auth_routes.py        #    认证路由（/auth/register /login /logout /me）
-│   │   ├── ui_routes.py          #    UI 路由（/ui/conversations /ui/chat/stream SSE）
+│   │   ├── ui_routes.py          #    UI 路由（/ui/conversations[/export] /ui/chat/stream SSE）
+│   │   ├── admin_routes.py       #    管理路由（/admin/users 列表/改角色/删除，仅 admin）
 │   │   └── schemas.py            #    Pydantic 请求/响应模型
 │   ├── agents/
-│   │   ├── graph.py              #    LangGraph 图组装（router→answer/rag/react→report）
+│   │   ├── graph.py              #    LangGraph 主图组装（router→answer/rag/react/team→report）
 │   │   ├── state.py              #    Agent 状态定义（TypedDict）
 │   │   ├── nodes.py              #    各节点实现（async：router/direct/agent/tools/report）
-│   │   └── tools.py             #    Agent 工具（knowledge_search 等）
+│   │   ├── multi_agent.py        #    多 Agent 协作子图（planner→worker→reviewer）
+│   │   └── tools.py              #    Agent 工具（knowledge_search 等）
 │   ├── llm/
 │   │   └── client.py             #    LLM 客户端（OpenAI 兼容协议，chat_invoke/ainvoke）
 │   ├── rag/
-│   │   ├── ingest.py             #    文档摄取（PDF/MD/TXT/HTML→分块→ChromaDB，按 owner 隔离）
+│   │   ├── ingest.py             #    文档摄取（PDF/DOCX/XLSX/MD/TXT/HTML→分块→ChromaDB，按 owner 隔离）
 │   │   └── retriever.py          #    MMR 检索（按 user_id 过滤 owner）
 │   ├── security/
 │   │   ├── auth.py               #    API Key + 密码校验基础
@@ -88,6 +93,7 @@ EdAgent/
 │       └── views/
 │           ├── Login.vue        #    登录页
 │           ├── Register.vue     #    注册页
+│           ├── Admin.vue        #    管理后台页（用户列表/角色切换/删除，仅 admin）
 │           └── Chat.vue         #    聊天主页面（会话侧栏/SSE/Markdown/知识库抽屉）
 ├── config/                       # 基础设施配置
 │   ├── nginx.conf                #    Nginx 反向代理（SSE 关闭缓冲）
@@ -118,25 +124,25 @@ EdAgent/
 
 ## 4. 技术栈
 
-| 层 | 技术 | 版本 |
-|---|---|---|
-| 后端框架 | FastAPI + uvicorn | ≥0.115 / workers=1 |
-| Agent 框架 | LangGraph + LangChain | ≥0.2 / ≥0.3 |
-| LLM 协议 | OpenAI 兼容（Ollama / DeepSeek / OpenAI） | — |
-| LLM（默认） | deepseek-r1:8b | Ollama |
-| Embedding | nomic-embed-text | Ollama |
-| 数据库 | PostgreSQL 16 | psycopg3 连接池 |
-| 向量库 | ChromaDB | ≥0.5 |
-| 缓存 | Redis 7.2 | — |
-| 前端框架 | Vue 3.5 + Vite 5 | SPA |
-| UI 库 | Element Plus 2.8 | 中文 zhCn |
-| 状态管理 | Pinia 2 | — |
-| 路由 | Vue Router 4 | history 模式 |
-| Markdown | marked + DOMPurify | — |
-| 鉴权 | Cookie Session（itsdangerous）+ Bearer API Key | — |
-| 密码哈希 | PBKDF2-HMAC-SHA256 | 标准库 |
-| 容器 | Docker / Docker Compose | — |
-| 可观测性 | Prometheus + OTel + Jaeger + Grafana | — |
+| 层         | 技术                                           | 版本                 |
+| --------- | -------------------------------------------- | ------------------ |
+| 后端框架      | FastAPI + uvicorn                            | ≥0.115 / workers=1 |
+| Agent 框架  | LangGraph + LangChain                        | ≥0.2 / ≥0.3        |
+| LLM 协议    | OpenAI 兼容（Ollama / DeepSeek / OpenAI）        | —                  |
+| LLM（默认）   | deepseek-r1:8b                               | Ollama             |
+| Embedding | nomic-embed-text                             | Ollama             |
+| 数据库       | PostgreSQL 16                                | psycopg3 连接池       |
+| 向量库       | ChromaDB                                     | ≥0.5               |
+| 缓存        | Redis 7.2                                    | —                  |
+| 前端框架      | Vue 3.5 + Vite 5                             | SPA                |
+| UI 库      | Element Plus 2.8                             | 中文 zhCn            |
+| 状态管理      | Pinia 2                                      | —                  |
+| 路由        | Vue Router 4                                 | history 模式         |
+| Markdown  | marked + DOMPurify                           | —                  |
+| 鉴权        | Cookie Session（itsdangerous）+ Bearer API Key | —                  |
+| 密码哈希      | PBKDF2-HMAC-SHA256                           | 标准库                |
+| 容器        | Docker / Docker Compose                      | —                  |
+| 可观测性      | Prometheus + OTel + Jaeger + Grafana         | —                  |
 
 ## 5. 配置详解
 
@@ -148,35 +154,39 @@ EdAgent/
 cp .env.example .env
 ```
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| **端口映射** | | |
-| `OLLAMA_HOST_PORT` | 11534 | Ollama 宿主机端口 |
-| `CHROMA_HOST_PORT` | 18000 | ChromaDB 宿主机端口 |
-| `POSTGRES_HOST_PORT` | 15432 | PostgreSQL 宿主机端口 |
-| `REDIS_HOST_PORT` | 16379 | Redis 宿主机端口 |
-| `AGENT_API_PORT` | 18080 | agent-api 直连端口 |
-| `NGINX_HOST_PORT` | 18088 | **Web 入口** |
-| `OTEL_GRPC_HOST_PORT` | 14317 | OTel gRPC |
-| `OTEL_HTTP_HOST_PORT` | 14318 | OTel HTTP |
-| `JAEGER_UI_HOST_PORT` | 16686 | Jaeger UI |
-| `PROMETHEUS_HOST_PORT` | 19090 | Prometheus |
-| `GRAFANA_HOST_PORT` | 13000 | Grafana |
-| **密码/密钥** | | |
-| `PG_PASSWORD` | change_me | PostgreSQL 密码 |
-| `AGENT_API_KEY` | change_me | Bearer API Key |
-| `AGENT_SESSION_SECRET` | change_me | Cookie 签名密钥 |
-| `GRAFANA_PASSWORD` | change_me | Grafana 管理员密码 |
-| **LLM** | | |
-| `LLM_BASE_URL` | http://ollama:11434/v1 | LLM API 地址 |
-| `LLM_API_KEY` | ollama | LLM API Key |
-| `LLM_MODEL` | deepseek-r1:8b | 模型名 |
-| **Embedding** | | |
-| `EMBEDDING_BASE_URL` | http://ollama:11434/v1 | Embedding API 地址 |
-| `EMBEDDING_API_KEY` | ollama | Embedding API Key |
-| `EMBEDDING_MODEL` | nomic-embed-text | 嵌入模型 |
-| **CPU** | | |
-| `OLLAMA_NUM_THREADS` | 8 | Ollama CPU 线程数 |
+| 变量                     | 默认值                      | 说明                |
+| ---------------------- | ------------------------ | ----------------- |
+| **端口映射**               | <br />                   | <br />            |
+| `OLLAMA_HOST_PORT`     | 11534                    | Ollama 宿主机端口      |
+| `CHROMA_HOST_PORT`     | 18000                    | ChromaDB 宿主机端口    |
+| `POSTGRES_HOST_PORT`   | 15432                    | PostgreSQL 宿主机端口  |
+| `REDIS_HOST_PORT`      | 16379                    | Redis 宿主机端口       |
+| `AGENT_API_PORT`       | 18080                    | agent-api 直连端口    |
+| `NGINX_HOST_PORT`      | 18088                    | **Web 入口**        |
+| `OTEL_GRPC_HOST_PORT`  | 14317                    | OTel gRPC         |
+| `OTEL_HTTP_HOST_PORT`  | 14318                    | OTel HTTP         |
+| `JAEGER_UI_HOST_PORT`  | 16686                    | Jaeger UI         |
+| `PROMETHEUS_HOST_PORT` | 19090                    | Prometheus        |
+| `GRAFANA_HOST_PORT`    | 13000                    | Grafana           |
+| **密码/密钥**              | <br />                   | <br />            |
+| `PG_PASSWORD`          | change\_me               | PostgreSQL 密码     |
+| `AGENT_API_KEY`        | change\_me               | Bearer API Key    |
+| `AGENT_SESSION_SECRET` | change\_me               | Cookie 签名密钥       |
+| `GRAFANA_PASSWORD`     | change\_me               | Grafana 管理员密码     |
+| **LLM**                | <br />                   | <br />            |
+| `LLM_BASE_URL`         | <http://ollama:11434/v1> | LLM API 地址        |
+| `LLM_API_KEY`          | ollama                   | LLM API Key       |
+| `LLM_MODEL`            | deepseek-r1:8b           | 模型名               |
+| **Embedding**          | <br />                   | <br />            |
+| `EMBEDDING_BASE_URL`   | <http://ollama:11434/v1> | Embedding API 地址  |
+| `EMBEDDING_API_KEY`    | ollama                   | Embedding API Key |
+| `EMBEDDING_MODEL`      | nomic-embed-text         | 嵌入模型              |
+| **CPU**                | <br />                   | <br />            |
+| `OLLAMA_NUM_THREADS`   | 8                        | Ollama CPU 线程数    |
+| **多 Agent 协作**       | <br />                   | <br />            |
+| `AGENT_TEAM_MAX_ROUNDS`    | 2                     | 多 Agent 协作审稿最大轮次 |
+| `AGENT_TEAM_PLANNER_PROMPT`  | (留空用默认)         | 规划者提示词         |
+| `AGENT_TEAM_REVIEWER_PROMPT` | (留空用默认)         | 审稿者提示词         |
 
 ### 5.2 Settings 类（app/config.py）
 
@@ -194,6 +204,8 @@ class Settings(BaseSettings):
     database_url / redis_url / chroma_url / collection_name / ingest_dir
     # Agent
     max_agent_steps: 15
+    # 多 Agent 协作
+    team_max_rounds: int = 2 / team_planner_prompt: str / team_reviewer_prompt: str
     # RAG
     rag_chunk_size: 512 / rag_chunk_overlap: 50 / rag_top_k: 5 / rag_mmr_lambda_mult: 0.5
     # 可观测性
@@ -210,18 +222,18 @@ PostgreSQL 密码通过 Docker secrets 注入（`secrets/pg_password.txt`），�
 
 ### 6.1 服务清单
 
-| 服务 | 镜像 | 容器名 | 端口 | 依赖 |
-|---|---|---|---|---|
-| ollama | ollama/ollama:0.32.3 | edagent-ollama | 11534 | — |
-| chromadb | chromadb/chroma:1.5.9 | edagent-chromadb | 18000 | — |
-| postgres | postgres:16-alpine | edagent-postgres | 15432 | — |
-| redis | redis:7.2-alpine | edagent-redis | 16379 | — |
-| agent-api | 本地构建 | edagent-agent-api | 18080 | ollama+chroma+pg+redis |
-| nginx | nginx:1.27-alpine | edagent-nginx | 18088 | agent-api |
-| otel-collector | otel/opentelemetry-collector-contrib | edagent-otel-collector | 14317/14318 | jaeger |
-| jaeger | jaegertracing/jaeger:2.6.0 | edagent-jaeger | 16686 | — |
-| prometheus | prom/prometheus:v2.54.1 | edagent-prometheus | 19090 | — |
-| grafana | grafana/grafana-oss:11.3.0 | edagent-grafana | 13000 | prometheus |
+| 服务             | 镜像                                   | 容器名                    | 端口          | 依赖                     |
+| -------------- | ------------------------------------ | ---------------------- | ----------- | ---------------------- |
+| ollama         | ollama/ollama:0.32.3                 | edagent-ollama         | 11534       | —                      |
+| chromadb       | chromadb/chroma:1.5.9                | edagent-chromadb       | 18000       | —                      |
+| postgres       | postgres:16-alpine                   | edagent-postgres       | 15432       | —                      |
+| redis          | redis:7.2-alpine                     | edagent-redis          | 16379       | —                      |
+| agent-api      | 本地构建                                 | edagent-agent-api      | 18080       | ollama+chroma+pg+redis |
+| nginx          | nginx:1.27-alpine                    | edagent-nginx          | 18088       | agent-api              |
+| otel-collector | otel/opentelemetry-collector-contrib | edagent-otel-collector | 14317/14318 | jaeger                 |
+| jaeger         | jaegertracing/jaeger:2.6.0           | edagent-jaeger         | 16686       | —                      |
+| prometheus     | prom/prometheus:v2.54.1              | edagent-prometheus     | 19090       | —                      |
+| grafana        | grafana/grafana-oss:11.3.0           | edagent-grafana        | 13000       | prometheus             |
 
 ### 6.2 Dockerfile 三阶段构建
 
@@ -259,6 +271,7 @@ CREATE TABLE users (
     id            BIGSERIAL PRIMARY KEY,
     username      VARCHAR(32) UNIQUE NOT NULL,
     password_hash TEXT NOT NULL,           -- pbkdf2_sha256$240000$salt$hash
+    role          VARCHAR(16) NOT NULL DEFAULT 'user',  -- admin / user（首个注册用户自动为 admin）
     created_at    TIMESTAMPTZ DEFAULT now()
 );
 
@@ -296,72 +309,97 @@ CREATE TABLE messages (
 START → router
          ├── simple → direct_answer → report → END
          ├── rag    → retrieve → agent ↔ tools → report → END
-         └── tool   → agent ↔ tools → report → END
+         ├── tool   → agent ↔ tools → report → END
+         └── team   → [子图: planner → worker ↔ tools → reviewer]
+                          reviewer --revise--> worker（最多 2 轮）
+                          reviewer --approve--> END → report → END
 ```
 
-| 节点 | 职责 | 异步 |
-|---|---|---|
-| `router` | 判断任务类型（简单/工具/RAG） | async + ainvoke |
-| `direct_answer` | 直接 LLM 回答 | async + ainvoke |
-| `retrieve` | ChromaDB 语义检索（按 user_id 过滤） | async |
-| `agent` | ReAct 循环（思考→行动→观察） | async + ainvoke |
-| `tools` | 工具执行（knowledge_search 等） | sync |
-| `report` | 结构化输出（answer/route/sources/tool_results） | sync |
+| 节点              | 职责                                        | 异步              |
+| --------------- | ----------------------------------------- | --------------- |
+| `router`        | 判断任务类型（简单/工具/RAG/team）                    | async + ainvoke |
+| `direct_answer` | 直接 LLM 回答                                 | async + ainvoke |
+| `retrieve`      | ChromaDB 语义检索（按 user\_id 过滤）              | async           |
+| `agent`         | ReAct 循环（思考→行动→观察）                        | async + ainvoke |
+| `tools`         | 工具执行（knowledge\_search 等）                 | sync            |
+| `team`          | 多 Agent 协作子图包装节点（见下）                      | async + ainvoke |
+| `report`        | 结构化输出（answer/route/sources/tool\_results） | sync            |
 
-**关键**：router/direct_answer/agent 三节点必须 `async def` + `ainvoke`，否则 `astream_events` 的 token 级事件不会冒泡。
+**多 Agent 协作子图**（[multi\_agent.py](app/agents/multi_agent.py)，TeamState 独立 schema）：
+
+| 子图节点       | 职责                                                           | <br />                                                                  |
+| ---------- | ------------------------------------------------------------ | :---------------------------------------------------------------------- |
+| `planner`  | 把复杂问题拆解为 2-4 个分析要点（内部消息，不推给前端）                               | <br />                                                                  |
+| `worker`   | 复用主图 `agent_node`（可调工具），token 以 `langgraph_node="worker"` 冒泡 | <br />                                                                  |
+| `reviewer` | 审稿：输出 \`{"verdict": "approve                                 | revise", "notes"}`；revise 时附意见退回 worker；达到 ` MAX\_TEAM\_ROUNDS=2\` 强制放行 |
+
+子图经 `team_node` 包装（透传 config 保证 user\_id 隔离与 token 事件冒泡），只把最终 AI 草稿回填主图。
+
+**关键**：需要流式输出的节点必须 `async def` + `ainvoke`，否则 `astream_events` 的 token 级事件不会冒泡；子图内需流式的节点名要加入 `ui_routes._STREAM_NODES`。
 
 ## 9. API 端点
 
 ### 9.1 认证（/api/v1/auth）
 
-| 方法 | 路径 | 鉴权 | 说明 |
-|---|---|---|---|
-| POST | /register | 公开 | 注册（用户名3-32字符，密码≥6） |
-| POST | /login | 公开 | 登录（写 Session Cookie） |
-| POST | /logout | 登录 | 登出（清除 Session） |
-| GET | /me | 登录 | 获取当前用户 |
+| 方法   | 路径        | 鉴权 | 说明                                      |
+| ---- | --------- | -- | --------------------------------------- |
+| POST | /register | 公开 | 注册（用户名3-32字符，密码≥6）；**首个注册用户自动成为 admin** |
+| POST | /login    | 公开 | 登录（写 Session Cookie）                    |
+| POST | /logout   | 登录 | 登出（清除 Session）                          |
+| GET  | /me       | 登录 | 获取当前用户（含 role）                          |
 
 ### 9.2 UI 专用（/api/v1/ui）
 
-| 方法 | 路径 | 鉴权 | 说明 |
-|---|---|---|---|
-| GET | /conversations | 登录 | 会话列表（仅本人） |
-| GET | /conversations/{id} | 登录 | 会话历史消息 |
-| DELETE | /conversations/{id} | 登录 | 删除会话（隔离校验） |
-| PATCH | /conversations/{id} | 登录 | 重命名会话 |
-| POST | /chat/stream | 登录 | **SSE 流式聊天** |
+| 方法     | 路径                         | 鉴权 | 说明                                |
+| ------ | -------------------------- | -- | --------------------------------- |
+| GET    | /conversations             | 登录 | 会话列表（仅本人，置顶优先排序）                  |
+| GET    | /conversations?q=keyword   | 登录 | 搜索会话（标题模糊匹配）                      |
+| GET    | /conversations/{id}        | 登录 | 会话历史消息                            |
+| GET    | /conversations/{id}/export?format=md\|html | 登录 | 导出会话（md/html，可打印为 PDF）             |
+| POST   | /conversations/{id}/pin    | 登录 | 切换会话置顶                            |
+| DELETE | /conversations/{id}        | 登录 | 删除会话（隔离校验）                        |
+| PATCH  | /conversations/{id}        | 登录 | 重命名会话                             |
+| POST   | /chat/stream               | 登录 | **SSE 流式聊天**（客户端断连即取消执行，部分答案自动落库） |
 
 ### 9.3 API / Agent（/api/v1）
 
-| 方法 | 路径 | 鉴权 | 说明 |
-|---|---|---|---|
-| POST | /chat | API Key | 简单问答 |
-| POST | /agent | API Key | LangGraph Agent（非流式） |
-| POST | /rag/documents | 双通道 | 上传文档（Cookie→用户隔离，API Key→全局） |
-| DELETE | /rag/documents/{source} | 双通道 | 删除文档 |
-| GET | /rag/stats | 双通道 | 知识库统计 |
-| POST | /rag/query | 双通道 | RAG 检索/问答 |
-| GET | /health | 公开 | 健康检查 |
-| GET | /metrics | 公开 | Prometheus 指标 |
+| 方法     | 路径                      | 鉴权      | 说明                           |
+| ------ | ----------------------- | ------- | ---------------------------- |
+| POST   | /chat                   | API Key | 简单问答                         |
+| POST   | /agent                  | API Key | LangGraph Agent（非流式）         |
+| POST   | /rag/documents          | 双通道     | 上传文档（Cookie→用户隔离，API Key→全局） |
+| DELETE | /rag/documents/{source} | 双通道     | 删除文档                         |
+| GET    | /rag/stats              | 双通道     | 知识库统计                        |
+| POST   | /rag/query              | 双通道     | RAG 检索/问答                    |
+| GET    | /health                 | 公开      | 健康检查                         |
+| GET    | /metrics                | 公开      | Prometheus 指标                |
 
-### 9.4 SSE 事件协议
+### 9.4 管理（/api/v1/admin，仅 admin 角色）
 
-| 事件 | 数据 | 说明 |
-|---|---|---|
-| `meta` | `{conversation_id, title}` | 会话元数据 |
-| `reasoning` | `{delta}` | 思考过程增量 |
-| `token` | `{delta}` | 回答 token 增量 |
-| `done` | `{answer, route, sources, tool_results, model}` | 结构化最终结果 |
-| `error` | `{message}` | 错误 |
+| 方法     | 路径               | 说明                                   |
+| ------ | ---------------- | ------------------------------------ |
+| GET    | /users           | 用户列表（含每人会话数）                         |
+| PATCH  | /users/{id}/role | 改角色（admin/user）；禁止改自己；至少保留一名管理员      |
+| DELETE | /users/{id}      | 删除用户（级联删除其会话/消息/检查点）；禁止删自己；至少保留一名管理员 |
+
+### 9.5 SSE 事件协议
+
+| 事件          | 数据                                              | 说明          |
+| ----------- | ----------------------------------------------- | ----------- |
+| `meta`      | `{conversation_id, title}`                      | 会话元数据       |
+| `reasoning` | `{delta}`                                       | 思考过程增量      |
+| `token`     | `{delta}`                                       | 回答 token 增量 |
+| `done`      | `{answer, route, sources, tool_results, model}` | 结构化最终结果     |
+| `error`     | `{message}`                                     | 错误          |
 
 ## 10. 鉴权系统
 
 ### 10.1 双通道设计
 
-| 通道 | 认证方式 | owner_id | RAG 隔离 | 适用场景 |
-|---|---|---|---|---|
-| Cookie Session | `edagent_session` Cookie | `user-{uid}` | 仅本人文档 | Web UI 用户 |
-| Bearer API Key | `Authorization: Bearer` | `None`（全局） | 全部文档 | 脚本/自动化 |
+| 通道             | 认证方式                     | owner\_id    | RAG 隔离 | 适用场景      |
+| -------------- | ------------------------ | ------------ | ------ | --------- |
+| Cookie Session | `edagent_session` Cookie | `user-{uid}` | 仅本人文档  | Web UI 用户 |
+| Bearer API Key | `Authorization: Bearer`  | `None`（全局）   | 全部文档   | 脚本/自动化    |
 
 ### 10.2 中间件顺序
 
@@ -374,7 +412,7 @@ START → router
 
 ### 11.1 文档摄取
 
-- 支持格式：PDF / Markdown / TXT / HTML
+- 支持格式：PDF / Word(docx) / Excel(xlsx，按工作表分页) / PPTX / CSV / Markdown / TXT / HTML
 - 分块：`rag_chunk_size=512`，`rag_chunk_overlap=50`
 - 元数据：`{owner: "user-{uid}", source: "{hash}_{filename}", original_name, page}`
 - 落盘：`/data/ingest/<owner>/<hash>_<filename>`
@@ -388,6 +426,7 @@ START → router
 ### 11.3 ChromaDB 多键 filter
 
 Chroma 的 `delete` / `get` 不接受平铺多键 dict，需用 `$and`：
+
 ```python
 where={"$and": [{"owner": owner}, {"source": source}]}
 ```
@@ -400,17 +439,18 @@ where={"$and": [{"owner": owner}, {"source": source}]}
 
 ### 12.2 路由
 
-| 路径 | 组件 | 守卫 |
-|---|---|---|
-| /login | Login.vue | guestOnly |
-| /register | Register.vue | guestOnly |
-| / | Chat.vue | requiresAuth |
+| 路径        | 组件           | 守卫           |
+| --------- | ------------ | ------------ |
+| /login    | Login.vue    | guestOnly    |
+| /register | Register.vue | guestOnly    |
+| /         | Chat.vue     | requiresAuth |
 
 URL query `?c=<conversation_id>` 用于会话恢复。
 
 ### 12.3 SSE 解析
 
 `streamChat()` 使用 `fetch + ReadableStream` 手动解析 SSE（非 EventSource，支持 POST）：
+
 - 按 `\n\n` 分割事件块
 - 解析 `event:` 和 `data:` 行
 - JSON.parse payload，分派到 onMeta/onReasoning/onToken/onDone/onError
@@ -427,12 +467,12 @@ npm run dev  # Vite dev server，proxy /api → localhost:18080
 
 ## 13. 可观测性
 
-| 组件 | 地址 | 用途 |
-|---|---|---|
-| Prometheus | http://localhost:19090 | 指标采集 |
-| Grafana | http://localhost:13000 | 仪表盘（admin / {GRAFANA_PASSWORD}） |
-| Jaeger | http://localhost:16686 | 链路追踪 |
-| OTel Collector | :14317(gRPC) / :14318(HTTP) | 管道转发 |
+| 组件             | 地址                          | 用途                               |
+| -------------- | --------------------------- | -------------------------------- |
+| Prometheus     | <http://localhost:19090>    | 指标采集                             |
+| Grafana        | <http://localhost:13000>    | 仪表盘（admin / {GRAFANA\_PASSWORD}） |
+| Jaeger         | <http://localhost:16686>    | 链路追踪                             |
+| OTel Collector | :14317(gRPC) / :14318(HTTP) | 管道转发                             |
 
 Grafana 仪表盘自动供给（`config/grafana/provisioning/`），无需手动导入。
 
@@ -491,6 +531,7 @@ EMBEDDING_MODEL=text-embedding-3-small
 ```
 
 重启 agent-api：
+
 ```bash
 docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d agent-api
 ```
@@ -499,15 +540,15 @@ docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d agent-api
 
 本项目共 10 个容器、7 个命名数据卷：
 
-| 数据卷 | 容器 | 挂载点 | 内容 | 迁移必要性 |
-|---|---|---|---|---|
-| `edagent_pg_data` | postgres | `/var/lib/postgresql/data` | 业务表 + LangGraph 检查点 | **必须** |
-| `edagent_chroma_data` | chromadb | `/data` | 向量索引（RAG 文档嵌入） | **必须** |
-| `edagent_ollama_data` | ollama | `/root/.ollama` | LLM + Embedding 模型权重 | **必须**（否则重新拉取约 5GB） |
-| `edagent_ingest_data` | agent-api | `/data/ingest` | 用户上传的原始文档 | 推荐 |
-| `edagent_redis_data` | redis | `/data` | 缓存（非持久业务数据） | 可选 |
-| `edagent_grafana_data` | grafana | `/var/lib/grafana` | 仪表盘配置 | 可选（配置已在 config/ 自动供给） |
-| `edagent_prom_data` | prometheus | `/prom` | 历史指标 | 可选 |
+| 数据卷                    | 容器         | 挂载点                        | 内容                   | 迁移必要性                 |
+| ---------------------- | ---------- | -------------------------- | -------------------- | --------------------- |
+| `edagent_pg_data`      | postgres   | `/var/lib/postgresql/data` | 业务表 + LangGraph 检查点  | **必须**                |
+| `edagent_chroma_data`  | chromadb   | `/data`                    | 向量索引（RAG 文档嵌入）       | **必须**                |
+| `edagent_ollama_data`  | ollama     | `/root/.ollama`            | LLM + Embedding 模型权重 | **必须**（否则重新拉取约 5GB）   |
+| `edagent_ingest_data`  | agent-api  | `/data/ingest`             | 用户上传的原始文档            | 推荐                    |
+| `edagent_redis_data`   | redis      | `/data`                    | 缓存（非持久业务数据）          | 可选                    |
+| `edagent_grafana_data` | grafana    | `/var/lib/grafana`         | 仪表盘配置                | 可选（配置已在 config/ 自动供给） |
+| `edagent_prom_data`    | prometheus | `/prom`                    | 历史指标                 | 可选                    |
 
 ### 14.5 完整迁移指南（旧机 → 新机）
 
@@ -615,13 +656,13 @@ curl -s http://localhost:18088/health                  # 健康检查
 
 #### 阶段四：故障排除
 
-| 症状 | 原因 | 解决 |
-|---|---|---|
-| PostgreSQL 启动失败 | 数据卷权限或版本不一致 | 删卷重建，用 `pg_dump.sql` 恢复：`docker exec -i edagent-postgres psql -U agent ai_agent < pg_dump.sql` |
-| Ollama 模型不可见 | 数据卷恢复路径不对 | `docker exec edagent-ollama ollama list` 确认，无则重新 `ollama pull` |
-| ChromaDB 报集合不存在 | 向量索引未恢复 | 重新上传文档到 `/api/v1/rag/documents` |
-| agent-api 启动报错连不上 PG | 启动顺序问题 | `docker compose up -d postgres` 先等 healthy，再 `up -d agent-api` |
-| Nginx 502 | agent-api 未就绪 | 等 30 秒重试，或 `docker logs edagent-agent-api --tail 20` |
+| 症状                   | 原因            | 解决                                                                                             |
+| -------------------- | ------------- | ---------------------------------------------------------------------------------------------- |
+| PostgreSQL 启动失败      | 数据卷权限或版本不一致   | 删卷重建，用 `pg_dump.sql` 恢复：`docker exec -i edagent-postgres psql -U agent ai_agent < pg_dump.sql` |
+| Ollama 模型不可见         | 数据卷恢复路径不对     | `docker exec edagent-ollama ollama list` 确认，无则重新 `ollama pull`                                 |
+| ChromaDB 报集合不存在      | 向量索引未恢复       | 重新上传文档到 `/api/v1/rag/documents`                                                                |
+| agent-api 启动报错连不上 PG | 启动顺序问题        | `docker compose up -d postgres` 先等 healthy，再 `up -d agent-api`                                 |
+| Nginx 502            | agent-api 未就绪 | 等 30 秒重试，或 `docker logs edagent-agent-api --tail 20`                                           |
 
 #### 精简迁移（仅核心数据，不含模型）
 
@@ -672,35 +713,46 @@ docker compose -f docker-compose.yml down -v
 
 ## 16. 已知坑点与注意事项
 
-| # | 坑点 | 原因 | 修复 |
-|---|---|---|---|
-| 1 | SSE 报 `NotImplementedError` | 同步 PostgresSaver 不支持异步图 | 改用 AsyncPostgresSaver |
-| 2 | `TypeError: run_sync() unexpected kwarg` | anyio 不透传 kwargs | 用 functools.partial 包装 |
-| 3 | Chroma `exactly one operator` | 多键 where 不接受平铺 | 用 `{"$and": [...]}` |
-| 4 | 前端永远停在"推理中" | reactive() 对象误用 .value | reactive 直接访问属性，不用 .value |
-| 5 | embedding 400 "invalid input type" | tokenizer 长度检查不兼容 | OpenAIEmbeddings 设 check_embedding_ctx_length=False |
-| 6 | Rollup 构建报 "not exported" | @element-plus/icons-vue 无 Calculator | 改用 DataAnalysis |
-| 7 | Grafana 13000 页面 404 | 浏览器 Vite Service Worker 残留 | 无痕窗口或清除 SW |
-| 8 | PowerShell 命令被拦 | ExecutionPolicy Restricted | 拆成单条简单命令 |
+| # | 坑点                                       | 原因                                   | 修复                                                     |
+| - | ---------------------------------------- | ------------------------------------ | ------------------------------------------------------ |
+| 1 | SSE 报 `NotImplementedError`              | 同步 PostgresSaver 不支持异步图              | 改用 AsyncPostgresSaver                                  |
+| 2 | `TypeError: run_sync() unexpected kwarg` | anyio 不透传 kwargs                     | 用 functools.partial 包装                                 |
+| 3 | Chroma `exactly one operator`            | 多键 where 不接受平铺                       | 用 `{"$and": [...]}`                                    |
+| 4 | 前端永远停在"推理中"                              | reactive() 对象误用 .value               | reactive 直接访问属性，不用 .value                              |
+| 5 | embedding 400 "invalid input type"       | tokenizer 长度检查不兼容                    | OpenAIEmbeddings 设 check\_embedding\_ctx\_length=False |
+| 6 | Rollup 构建报 "not exported"                | @element-plus/icons-vue 无 Calculator | 改用 DataAnalysis                                        |
+| 7 | Grafana 13000 页面 404                     | 浏览器 Vite Service Worker 残留           | 无痕窗口或清除 SW                                             |
+| 8 | PowerShell 命令被拦                          | ExecutionPolicy Restricted           | 拆成单条简单命令                                               |
 
 ## 17. Skills 索引
 
 项目内 `.trae/skills/` 下有 5 个 Trae Skill，在对话中自动匹配加载：
 
-| Skill | 触发场景 |
-|---|---|
-| langgraph-agent-builder | 创建 Agent 图、定义节点和边 |
-| rag-pipeline-builder | 构建 RAG 检索管道 |
-| observability-setup | 配置 Prometheus/Grafana/OTel |
-| docker-compose-generator | 生成 Docker Compose 配置 |
-| edagent-user-ui-sse | 用户系统/SSE/UI 排错 |
+| Skill                    | 触发场景                       |
+| ------------------------ | -------------------------- |
+| langgraph-agent-builder  | 创建 Agent 图、定义节点和边          |
+| rag-pipeline-builder     | 构建 RAG 检索管道                |
+| observability-setup      | 配置 Prometheus/Grafana/OTel |
+| docker-compose-generator | 生成 Docker Compose 配置       |
+| edagent-user-ui-sse      | 用户系统/SSE/UI 排错             |
 
 ## 18. 后续扩展方向
 
-- **模型升级**：更换 `.env` 中 `LLM_MODEL`，Ollama 自动拉取（如 qwen2.5:14b）
-- **多用户权限**：增加角色表（admin/user），管理端点
-- **文档格式扩展**：在 ingest.py 增加 DOCX/XLSX 解析器
-- **对话导出**：新增 `/ui/conversations/{id}/export` 导出 Markdown
-- **流式取消**：前端 AbortController 已实现，后端可增加中断信号
-- **多 Agent 协作**：LangGraph 支持 subgraph，可在图中编排多个 Agent
-- **模型微调**：Ollama 支持自定义 Modelfile，基于现有模型微调
+前一批扩展已于 2026-09-28 完成：角色系统（admin/user + 管理端点）、DOCX/XLSX 摄取、
+会话导出 Markdown、SSE 流式取消（断连检测 + 部分答案落库）、多 Agent 协作子图
+（planner → worker → reviewer，路由标签 `team`）。
+
+本批扩展已于 2026-09-28 完成：管理后台页面（前端 `/admin`，用户列表/角色切换/删除）、
+会话置顶/搜索（标题关键词模糊匹配 + 置顶排序）、PPTX/CSV 文档摄取（ingest.py 新增
+python-pptx + csv 解析）、导出格式扩展（Markdown / HTML / 打印为 PDF）、协作小组
+可配置（`AGENT_TEAM_MAX_ROUNDS` 及 planner/reviewer 提示词通过 `.env` 配置）。
+
+下一批候选：
+
+- **模型微调或 RAG 调优**：Ollama Modelfile 自定义微调，或调整分块/检索参数提升命中率
+- **会话标签分类**：多维度标签组织会话（项目/主题/时间等）
+- **批量文档导入**：支持文件夹整体上传与并发摄取
+- **WebSocket 实时多用户协作**：多端共享会话、消息实时同步
+- **插件系统**：自定义工具扩展（动态加载外部 Tool）
+- **多语言界面（i18n）**：中英文等多语言切换
+

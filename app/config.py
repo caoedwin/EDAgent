@@ -44,6 +44,21 @@ class Settings(BaseSettings):
     # ---------- Agent ----------
     max_agent_steps: int = 15
 
+    # ---------- 多 Agent 协作 ----------
+    team_max_rounds: int = 2
+    team_planner_prompt: str = (
+        '你是分析小组的"规划者"。把用户的问题拆解为 2-4 个关键分析要点，'
+        "帮助执行者给出全面、有深度的回答。只输出要点列表，不要回答问题本身。格式：\n"
+        "1. 要点一\n2. 要点二"
+    )
+    team_reviewer_prompt: str = (
+        '你是分析小组的"审稿者"。对照用户问题和分析计划，评估草稿是否：\n'
+        "- 完整覆盖了各个要点\n- 结论明确、逻辑自洽\n- 没有遗漏用户问的子问题\n\n"
+        "当前是第 {iteration}/{max_rounds} 轮审稿（达到上限时请放行）。\n"
+        "只输出一行 JSON，不要输出其他内容：\n"
+        '{{"verdict": "approve|revise", "notes": "一句话审稿意见（revise 时给出具体修改要求）"}}'
+    )
+
     # ---------- RAG ----------
     rag_chunk_size: int = 512
     rag_chunk_overlap: int = 50
