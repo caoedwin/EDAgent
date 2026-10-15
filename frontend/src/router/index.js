@@ -28,6 +28,12 @@ const router = createRouter({
       component: () => import('../views/Admin.vue'),
       meta: { requiresAuth: true, requiresAdmin: true },
     },
+    {
+      path: '/team',
+      name: 'team',
+      component: () => import('../views/Team.vue'),
+      meta: { requiresAuth: true },
+    },
     { path: '/:pathMatch(.*)*', redirect: '/' },
   ],
 })

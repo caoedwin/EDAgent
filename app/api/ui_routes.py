@@ -19,14 +19,22 @@ from typing import Any
 from urllib.parse import quote
 
 from anyio import to_thread
-from fastapi import APIRouter, Depends, HTTPException, Request
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import HTMLResponse, PlainTextResponse, StreamingResponse
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
 from app import db
+from app.api.broadcast import hub
 from app.config import settings
-from app.security.web_auth import require_login
+from app.security.web_auth import require_login, session_user_id
 
 logger = logging.getLogger("edagent.ui")
 
@@ -36,6 +44,11 @@ router = APIRouter(prefix="/api/v1/ui", tags=["ui"])
 # （router 的路由 JSON、planner/reviewer 的内部协作消息属于内部调用；
 #   "worker" 是多 Agent 子图中的执行者节点，其 token 即最终草稿）
 _STREAM_NODES = {"direct_answer", "agent", "worker"}
+
+# 标签 / 分类的清洗上限
+_MAX_TAGS = 10
+_MAX_TAG_LEN = 24
+_MAX_CATEGORY_LEN = 32
 
 
 class ChatStreamRequest(BaseModel):
@@ -47,6 +60,33 @@ class ConversationUpdate(BaseModel):
     title: str = Field(min_length=1, max_length=100)
 
 
+class ConversationMetaUpdate(BaseModel):
+    """会话组织维度局部更新；请求体中未出现的字段保持不变。"""
+
+    tags: list[str] | None = None
+    category: str | None = None
+    favorite: bool | None = None
+
+
+def _ensure_uuid(value: str) -> str:
+    """校验 UUID 字符串；非法时按「资源不存在」处理。"""
+    try:
+        uuid.UUID(value)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail="会话不存在") from exc
+    return value
+
+
+def _normalize_tags(tags: list[str]) -> list[str]:
+    """清洗标签：去首尾空白、去重、限长限量。"""
+    cleaned: list[str] = []
+    for raw in tags:
+        name = str(raw).strip()[:_MAX_TAG_LEN]
+        if name and name not in cleaned:
+            cleaned.append(name)
+    return cleaned[:_MAX_TAGS]
+
+
 def _sse(event: str, data: dict[str, Any]) -> bytes:
     payload = json.dumps(data, ensure_ascii=False)
     return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
@@ -56,9 +96,28 @@ def _sse(event: str, data: dict[str, Any]) -> bytes:
 def list_conversations(
     request: Request,
     q: str | None = None,
+    tag: str | None = None,
+    category: str | None = None,
+    favorite: int = 0,
     user: dict = Depends(require_login),
 ) -> dict:
-    return {"items": db.list_conversations(request.app.state.pool, user["id"], query=q)}
+    """会话列表：支持标题模糊搜索、标签 / 分类筛选与「仅收藏」过滤。"""
+    return {
+        "items": db.list_conversations(
+            request.app.state.pool,
+            user["id"],
+            query=q,
+            tag=tag,
+            category=category,
+            favorite=bool(favorite),
+        )
+    }
+
+
+@router.get("/conversation-filters")
+def conversation_filters(request: Request, user: dict = Depends(require_login)) -> dict:
+    """当前用户已用过的分类与标签（含计数），供侧栏筛选下拉使用。"""
+    return db.list_conversation_filters(request.app.state.pool, user["id"])
 
 
 @router.get("/conversations/{conversation_id}")
@@ -236,6 +295,180 @@ def rename_conversation(
     return {"ok": True}
 
 
+# ==================== 会话组织维度：标签 / 分类 / 收藏 ====================
+
+
+@router.patch("/conversations/{conversation_id}/meta")
+def update_conversation_meta(
+    conversation_id: str,
+    payload: ConversationMetaUpdate,
+    request: Request,
+    user: dict = Depends(require_login),
+) -> dict:
+    """局部更新会话的标签 / 分类 / 收藏。
+
+    仅更新请求体中显式出现的字段：tags 传 `[]` 清空标签，category 传空串清空分类。
+    """
+    _ensure_uuid(conversation_id)
+    provided = payload.model_dump(exclude_unset=True)
+
+    changes: dict[str, Any] = {}
+    if "tags" in provided:
+        changes["tags"] = _normalize_tags(provided["tags"] or [])
+    if "category" in provided:
+        category = (provided["category"] or "").strip()[:_MAX_CATEGORY_LEN]
+        changes["category"] = category or None
+    if "favorite" in provided:
+        changes["favorite"] = bool(provided["favorite"])
+
+    conv = db.update_conversation_meta(
+        request.app.state.pool, conversation_id, user["id"], changes
+    )
+    if conv is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {"ok": True, "conversation": conv}
+
+
+# ==================== 协作围观：分享链接 ====================
+
+
+@router.get("/conversations/{conversation_id}/share")
+def get_conversation_share(
+    conversation_id: str, request: Request, user: dict = Depends(require_login)
+) -> dict:
+    """读取会话分享状态（供分享弹窗回显）。"""
+    _ensure_uuid(conversation_id)
+    token = db.get_share_token(request.app.state.pool, conversation_id, user["id"])
+    if token is None and (
+        db.get_owned_conversation(request.app.state.pool, conversation_id, user["id"])
+        is None
+    ):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {
+        "ok": True,
+        "enabled": token is not None,
+        "share_token": token,
+        "share_url": f"/?c={conversation_id}&share={token}" if token else None,
+        "viewers": hub.viewer_count(token) if token else 0,
+    }
+
+
+@router.post("/conversations/{conversation_id}/share")
+def create_conversation_share(
+    conversation_id: str, request: Request, user: dict = Depends(require_login)
+) -> dict:
+    """开启协作围观：生成（或沿用）分享 token，任何登录用户凭链接只读实时围观。"""
+    _ensure_uuid(conversation_id)
+    token = db.enable_share(request.app.state.pool, conversation_id, user["id"])
+    if token is None:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    return {
+        "ok": True,
+        "share_token": token,
+        "share_url": f"/?c={conversation_id}&share={token}",
+        "viewers": hub.viewer_count(token),
+    }
+
+
+@router.delete("/conversations/{conversation_id}/share")
+async def revoke_conversation_share(
+    conversation_id: str, request: Request, user: dict = Depends(require_login)
+) -> dict:
+    """关闭协作围观：清空 token 并解散已打开的围观连接。"""
+    _ensure_uuid(conversation_id)
+    pool = request.app.state.pool
+    token = await to_thread.run_sync(
+        db.get_share_token, pool, conversation_id, user["id"]
+    )
+    if not await to_thread.run_sync(db.disable_share, pool, conversation_id, user["id"]):
+        raise HTTPException(status_code=404, detail="会话不存在")
+    if token:
+        await hub.close_room(
+            token, {"type": "error", "message": "发起人已关闭协作围观"}
+        )
+    return {"ok": True}
+
+
+@router.get("/shared/{share_token}")
+def get_shared_conversation(
+    share_token: str, request: Request, user: dict = Depends(require_login)
+) -> dict:
+    """围观者读取共享会话（只读，含历史消息）。"""
+    conv = db.get_shared_conversation(request.app.state.pool, share_token)
+    if conv is None:
+        raise HTTPException(status_code=404, detail="分享链接无效或已关闭")
+    conv["messages"] = db.list_messages(request.app.state.pool, conv["id"])
+    return conv
+
+
+@router.websocket("/ws/{share_token}")
+async def collaborate(websocket: WebSocket, share_token: str) -> None:
+    """协作围观 WebSocket：接入某会话的实时房间。
+
+    下发事件类型：
+      history    加入时的历史消息与发起人
+      presence   在线成员列表（去重）
+      join/leave 成员进出提示
+      turn_start 发起人提问（围观者插入新的一轮）
+      reasoning / token / turn_done / turn_error   AI 输出事件
+    只读语义：客户端上行文本仅作为心跳，内容被忽略。
+    """
+    pool = websocket.app.state.pool
+    user_id = session_user_id(websocket)
+    # 先 accept 再校验：未 accept 时 close() 只能让客户端收到 403（无自定义关闭码），
+    # accept 后关闭可携带 44xx 语义码，前端据此给出明确提示
+    await websocket.accept()
+    if user_id is None:
+        await websocket.send_json({"type": "error", "message": "登录已失效，请重新登录"})
+        await websocket.close(code=4401)
+        return
+
+    user = await to_thread.run_sync(db.get_user, pool, user_id)
+    conv = await to_thread.run_sync(db.get_shared_conversation, pool, share_token)
+    if user is None or conv is None:
+        await websocket.send_json(
+            {"type": "error", "message": "分享链接无效或已被关闭"}
+        )
+        await websocket.close(code=4404)
+        return
+
+    member = {"id": user["id"], "username": user["username"]}
+    await hub.join(share_token, websocket, member)
+    try:
+        messages = await to_thread.run_sync(db.list_messages, pool, conv["id"])
+        await websocket.send_json(
+            {
+                "type": "history",
+                "conversation_id": conv["id"],
+                "title": conv["title"],
+                "owner": conv["owner_username"],
+                "messages": messages,
+            }
+        )
+        await hub.broadcast(
+            share_token, {"type": "presence", "members": hub.members(share_token)}
+        )
+        await hub.broadcast(
+            share_token,
+            {"type": "join", "username": member["username"]},
+            exclude=websocket,
+        )
+        while True:
+            await websocket.receive_text()  # 只读房间：上行内容忽略，仅用于探活
+    except WebSocketDisconnect:
+        pass
+    except Exception:  # 非预期断开：清理连接即可，不影响其他围观者
+        logger.debug("协作 WebSocket 异常关闭 room=%s", share_token, exc_info=True)
+    finally:
+        await hub.leave(share_token, websocket)
+        await hub.broadcast(
+            share_token, {"type": "presence", "members": hub.members(share_token)}
+        )
+        await hub.broadcast(
+            share_token, {"type": "leave", "username": member["username"]}
+        )
+
+
 @router.post("/chat/stream")
 async def chat_stream(
     payload: ChatStreamRequest,
@@ -257,6 +490,7 @@ async def chat_stream(
     # producer 与清理逻辑共享的收集器（中断时用于持久化部分结果）
     collected: dict[str, Any] = {
         "conv": None,
+        "room": None,
         "answer": [],
         "reasoning": [],
         "saved": False,
@@ -283,11 +517,24 @@ async def chat_stream(
                     db.create_conversation, pool, user["id"], title
                 )
             collected["conv"] = conv
+            # 已开启协作围观时，同步把本轮问答广播到围观房间
+            room = conv.get("share_token")
+            collected["room"] = room
 
             queue.put_nowait(_sse("meta", {"conversation_id": conv["id"], "title": conv["title"]}))
             await to_thread.run_sync(
                 db.add_message, pool, conv["id"], "user", payload.message
             )
+            if room:
+                await hub.broadcast(
+                    room,
+                    {
+                        "type": "turn_start",
+                        "conversation_id": conv["id"],
+                        "username": user["username"],
+                        "message": payload.message,
+                    },
+                )
 
             # 2) 运行 LangGraph，转发 token 流
             config = {
@@ -318,9 +565,15 @@ async def chat_stream(
                 if reasoning:
                     collected["reasoning"].append(reasoning)
                     queue.put_nowait(_sse("reasoning", {"delta": reasoning}))
+                    if room:
+                        await hub.broadcast(
+                            room, {"type": "reasoning", "delta": reasoning}
+                        )
                 if text:
                     collected["answer"].append(text)
                     queue.put_nowait(_sse("token", {"delta": text}))
+                    if room:
+                        await hub.broadcast(room, {"type": "token", "delta": text})
 
             # 3) 取结构化最终报告并落库
             state_snapshot = await graph.aget_state(config)
@@ -357,10 +610,25 @@ async def chat_stream(
                     },
                 )
             )
+            if room:
+                await hub.broadcast(
+                    room,
+                    {
+                        "type": "turn_done",
+                        "answer": answer,
+                        "route": route,
+                        "sources": sources,
+                        "tool_results": tool_results,
+                    },
+                )
         except Exception as exc:  # LLM / 图执行失败
             tb = traceback.format_exc()
             logger.warning("chat stream failed: %s\n%s", repr(exc), tb)
-            queue.put_nowait(_sse("error", {"message": f"生成失败：{type(exc).__name__}: {exc}"}))
+            message = f"生成失败：{type(exc).__name__}: {exc}"
+            queue.put_nowait(_sse("error", {"message": message}))
+            room = collected.get("room")
+            if room:
+                await hub.broadcast(room, {"type": "turn_error", "message": message})
         finally:
             queue.put_nowait(None)  # 结束哨兵
 
@@ -386,6 +654,7 @@ async def chat_stream(
                 interrupted = True
                 producer_task.cancel()
             conv = collected.get("conv")
+            room = collected.get("room")
             if interrupted and conv and not collected["saved"]:
                 answer = "".join(collected["answer"]).strip()
                 if answer:
@@ -399,6 +668,19 @@ async def chat_stream(
                         )
                     except Exception:  # 清理阶段落库失败不影响连接关闭
                         logger.exception("persist partial answer failed")
+                if room:
+                    # 发起人中断生成：同步告知围观者本轮结束（保留已生成的部分内容）
+                    await hub.broadcast(
+                        room,
+                        {
+                            "type": "turn_done",
+                            "answer": answer,
+                            "route": None,
+                            "sources": [],
+                            "tool_results": [],
+                            "aborted": True,
+                        },
+                    )
             # 等待 producer 收尾，避免任务泄漏（吞掉取消异常）
             try:
                 await producer_task

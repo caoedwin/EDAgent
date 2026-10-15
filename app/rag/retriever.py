@@ -23,18 +23,27 @@ def get_vector_store() -> Chroma:
 
 
 def get_retriever(user_id: str | None = None):
-    """MMR 检索器：相似度 Top-K=5 基础上做最大边际相关性去重。
+    """检索器工厂：根据配置返回 MMR / Similarity / ScoreThreshold 检索器。
 
     user_id 非空时只检索该用户拥有的文档；None 表示不做归属过滤（API Key 调用）。
     """
     search_kwargs: dict = {
         "k": settings.rag_top_k,
-        "lambda_mult": settings.rag_mmr_lambda_mult,
     }
     if user_id is not None:
         search_kwargs["filter"] = {"owner": user_id}
+
+    search_type = settings.rag_search_type.lower()
+    if search_type not in ("mmr", "similarity", "similarity_score_threshold"):
+        search_type = "mmr"
+
+    if search_type == "mmr":
+        search_kwargs["lambda_mult"] = settings.rag_mmr_lambda_mult
+    elif search_type == "similarity_score_threshold":
+        search_kwargs["score_threshold"] = settings.rag_score_threshold
+
     return get_vector_store().as_retriever(
-        search_type="mmr",
+        search_type=search_type,
         search_kwargs=search_kwargs,
     )
 

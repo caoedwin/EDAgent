@@ -8,6 +8,7 @@
 import hmac
 
 from fastapi import Depends, HTTPException, Request
+from starlette.requests import HTTPConnection
 
 from app.config import settings
 
@@ -16,8 +17,8 @@ SESSION_USERNAME_KEY = "username"
 SESSION_ROLE_KEY = "role"
 
 
-def session_user_id(request: Request) -> int | None:
-    """从登录 Cookie 中解析用户 ID；未登录返回 None。"""
+def session_user_id(request: HTTPConnection) -> int | None:
+    """从登录 Cookie 中解析用户 ID；未登录返回 None。HTTP 请求与 WebSocket 均适用。"""
     try:
         raw = request.session.get(SESSION_USER_KEY)
         return int(raw) if raw else None

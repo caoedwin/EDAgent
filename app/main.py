@@ -23,13 +23,16 @@ from app import __version__, db
 from app.agents.graph import build_agent_graph
 from app.api.admin_routes import router as admin_router
 from app.api.auth_routes import router as auth_router
+from app.api.plugin_routes import router as plugin_router
 from app.api.routes import router as api_router
+from app.api.team_routes import router as team_router
 from app.api.ui_routes import router as ui_router
 from app.config import settings
 from app.memory.checkpointer import create_checkpointer
 from app.observability.metrics import ERRORS, REQUEST_DURATION, render_metrics
 from app.observability.tracing import init_tracing
 from app.security.web_auth import has_valid_api_key, session_user_id
+from app.team.roles import sync_roles_to_db
 
 # 无需登录即可访问的 API（注册 / 登录）
 PUBLIC_API_PATHS = frozenset({"/api/v1/auth/register", "/api/v1/auth/login"})
@@ -40,6 +43,8 @@ STATIC_DIR = Path(settings.static_dir)
 async def lifespan(app: FastAPI):
     # Postgres 未就绪时两个工厂内部都会重试
     app.state.pool = db.create_pool(settings.database_url)
+    # Team OS：启动时把角色定义同步到 DB
+    sync_roles_to_db(app.state.pool)
     checkpointer = await create_checkpointer()
     app.state.graph = build_agent_graph(checkpointer)
     app.state.checkpointer = checkpointer
@@ -135,6 +140,8 @@ app.include_router(api_router)
 app.include_router(auth_router)
 app.include_router(ui_router)
 app.include_router(admin_router)
+app.include_router(team_router)
+app.include_router(plugin_router)
 
 
 @app.exception_handler(LangChainException)

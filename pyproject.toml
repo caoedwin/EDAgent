@@ -35,6 +35,8 @@ dependencies = [
     "python-pptx>=0.6",
     # Markdown -> HTML（会话导出 HTML 格式）
     "markdown-it-py>=3.0",
+    # 角色配置文件解析（Team OS 角色定义）
+    "pyyaml>=6.0",
     # 可观测性
     "prometheus-client>=0.21",
     "opentelemetry-distro>=0.47",

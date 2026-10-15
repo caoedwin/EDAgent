@@ -297,6 +297,52 @@ CREATE TABLE messages (
     tool_results    JSONB,                 -- 工具调用结果
     created_at      TIMESTAMPTZ DEFAULT now()
 );
+
+-- ==================== Team OS（多角色团队协作） ====================
+-- 角色注册表：启动时由 app/team/roles/*.yaml 幂等同步（upsert）
+CREATE TABLE agent_roles (
+    name VARCHAR(32) PRIMARY KEY,      -- pm/product/architect/developer/tester/reviewer
+    display_name VARCHAR(64), description TEXT, system_prompt TEXT,
+    allowed_tools JSONB DEFAULT '[]', artifact_types JSONB DEFAULT '[]',
+    requires_human_confirm BOOLEAN DEFAULT FALSE, is_builtin BOOLEAN DEFAULT TRUE
+);
+
+-- 团队：一个用户可拥有多个团队，互相隔离
+CREATE TABLE teams (
+    id UUID PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    name VARCHAR(100), template VARCHAR(32),   -- software_dev/content_creation/data_analysis
+    created_at/updated_at TIMESTAMPTZ
+);
+
+-- 团队任务：DAG 节点（depends_on 决定拓扑顺序）
+CREATE TABLE team_tasks (
+    id UUID PRIMARY KEY, team_id UUID, conversation_id UUID, user_id BIGINT,
+    role VARCHAR(32), title VARCHAR(200), description TEXT,
+    status VARCHAR(16),                -- pending/running/blocked/done/failed/cancelled
+    depends_on JSONB DEFAULT '[]', artifact_id UUID, error TEXT
+);
+
+-- 产物：PRD/架构文档/代码/测试报告/评审意见/沙箱验证报告
+CREATE TABLE team_artifacts (
+    id UUID PRIMARY KEY, task_id UUID REFERENCES team_tasks(id) ON DELETE CASCADE,
+    type VARCHAR(32), title VARCHAR(200), content TEXT, version INT DEFAULT 1
+);
+
+-- PR / 补丁：开发产物解析成 unified diff，评审后可 apply/reject
+CREATE TABLE team_prs (
+    id UUID PRIMARY KEY, team_id UUID, task_id UUID REFERENCES team_tasks(id) ON DELETE CASCADE,
+    title VARCHAR(200), diff_content TEXT, files_changed JSONB DEFAULT '[]',
+    status VARCHAR(16),                -- pending/approved/needs_changes/applied/rejected
+    reviewer_notes TEXT
+);
+
+-- 通知：任务阻塞/失败/团队完成时写入，前端铃铛展示未读数
+CREATE TABLE notifications (
+    id BIGSERIAL PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    team_id UUID, task_id UUID,
+    type VARCHAR(32),                  -- task_blocked/task_failed/team_done
+    title VARCHAR(200), body TEXT, is_read BOOLEAN DEFAULT FALSE
+);
 ```
 
 ### 7.2 LangGraph 检查点表
@@ -391,6 +437,45 @@ START → router
 | `token`     | `{delta}`                                       | 回答 token 增量 |
 | `done`      | `{answer, route, sources, tool_results, model}` | 结构化最终结果     |
 | `error`     | `{message}`                                     | 错误          |
+
+### 9.6 团队协作（Team OS，/api/v1/team）
+
+Team OS 是一个**独立于主 Agent 图**的子系统：PM 把目标拆成 WBS（含依赖关系），
+`scheduler.py` 做拓扑排序后按 `AGENT_TEAM_MAX_PARALLEL` 并发执行各角色任务，
+需要人工确认的角色（pm/product/architect/reviewer）执行完转为 `blocked` 并写通知，等用户确认后继续。
+
+| 方法     | 路径                                        | 说明                                    |
+| ------ | ----------------------------------------- | ------------------------------------- |
+| GET    | /roles                                    | 角色列表（含 system\_prompt/工具/产物类型/是否需人工确认） |
+| GET    | /templates                                | 团队模板列表（软件开发/内容创作/数据分析）                |
+| GET    | /list                                     | 我创建的团队（含任务/产物统计）                       |
+| POST   | /start                                    | 启动团队协作（body: goal/conversation\_id/template） |
+| POST   | /create                                   | 建团队（带 goal 则同时启动）                      |
+| GET    | /{team\_id}                               | 任务进度 + 状态汇总                            |
+| GET    | /{team\_id}/artifacts                     | 全部产物                                  |
+| POST   | /{team\_id}/tasks/{task\_id}/confirm      | 人工确认/拒绝（blocked 任务放行）                  |
+| PATCH  | /{team\_id}/rename                        | 团队重命名                                 |
+| DELETE | /{team\_id}                               | 删除团队（级联任务/产物/PR）                       |
+| GET    | /{team\_id}/prs                           | PR 列表                                 |
+| POST   | /{team\_id}/prs/{pr\_id}/apply            | 应用补丁（`patch -p1`，默认目标 `/app`）           |
+| POST   | /{team\_id}/prs/{pr\_id}/reject           | 拒绝补丁                                  |
+| GET    | /notifications                            | 通知列表（支持 unread\_only）                  |
+| GET    | /notifications/unread-count               | 未读数                                   |
+| POST   | /notifications/{id}/read                  | 标记已读                                  |
+| POST   | /notifications/read-all                   | 全部已读                                  |
+
+**关键实现约束**：固定路径路由（`/templates`、`/list`、`/notifications*`）必须注册在 `/{team_id}` **之前**，
+否则会被 `/{team_id}` 通配吞掉。
+
+#### 沙箱执行（可选）
+
+开发者角色产出代码后，会把文件写入一次性 Docker 沙箱做编译验证（`compileall`），
+结果存为 `sandbox_report` 产物。沙箱不可用时降级为告警，不阻塞 PR 生成。
+
+- 依赖：容器内 `docker` CLI（Debian 的 `docker-cli` 包）+ 挂载宿主机 `/var/run/docker.sock`
+- 权限：Docker Desktop 下 socket 属 `root:root 0660`，非 root 运行的应用需 `group_add: ["0"]`
+- **安全提示**：挂载 docker.sock 等价于给该容器宿主机 root 权限，仅适用于本地自托管场景
+- 配置：`AGENT_TEAM_SANDBOX_ENABLED`、`AGENT_TEAM_SANDBOX_IMAGE`（默认用本平台镜像，避免依赖镜像源）、`AGENT_TEAM_SANDBOX_TIMEOUT`
 
 ## 10. 鉴权系统
 
@@ -755,4 +840,7 @@ python-pptx + csv 解析）、导出格式扩展（Markdown / HTML / 打印为 P
 - **WebSocket 实时多用户协作**：多端共享会话、消息实时同步
 - **插件系统**：自定义工具扩展（动态加载外部 Tool）
 - **多语言界面（i18n）**：中英文等多语言切换
+- **Team OS 产品化**：角色可视化管理页（自定义 system_prompt/工具白名单）、任务 DAG 图形化展示、
+  产物版本 diff 对比、通知 Webhook/邮件外发、团队运行成本与耗时统计
+- **Team OS 算力升级**：GPU 模式或接入在线 API，才能让 6 角色串行/并发协作具备实用性
 

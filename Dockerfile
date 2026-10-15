@@ -1,5 +1,7 @@
-# syntax=docker/dockerfile:1.7
 # EdAgent 应用镜像（Node 构建 Vue3 SPA + Python 3.14-slim / uv 多阶段构建）
+# 说明：不使用 "# syntax=docker/dockerfile:1.7" —— 该指令会强制从镜像源拉取
+# docker/dockerfile 前端镜像，国内镜像源时常 502。BuildKit 内建前端同样支持
+# RUN --mount=type=cache 语法，故此处直接依赖内建前端。
 
 # ---------- 阶段 1：前端 SPA ----------
 FROM node:22-alpine AS frontend
@@ -32,7 +34,11 @@ COPY app ./app
 
 # ---------- 阶段 3：运行时 ----------
 FROM python:3.14-slim AS runtime
-RUN groupadd -r agent && useradd -r -g agent agent
+# Team OS：补丁机制依赖 diff/patch；sandbox 需要 docker CLI（Debian 的 docker.io 包不含 CLI，CLI 在 docker-cli）
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends diffutils patch docker-cli \
+    && rm -rf /var/lib/apt/lists/* \
+    && groupadd -r agent && useradd -r -g agent agent
 WORKDIR /app
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /app/app /app/app
@@ -40,6 +46,8 @@ COPY --from=builder /app/app /app/app
 COPY --from=frontend /fe/dist /app/static
 # 预建 ingest 目录并归属 agent：named volume 首次挂载会继承该属主
 RUN mkdir -p /data/ingest && chown -R agent:agent /data/ingest
+# 预建 plugins 目录并归属 agent：插件系统（bind mount 会覆盖，但保证镜像内存在）
+RUN mkdir -p /app/plugins && chown -R agent:agent /app/plugins
 ENV PATH="/app/.venv/bin:$PATH" \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1

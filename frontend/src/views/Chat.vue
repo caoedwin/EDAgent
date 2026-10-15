@@ -16,8 +16,46 @@
           class="search-input"
           @input="onSearch"
         />
+        <!-- 会话组织维度：全部 / 收藏 + 分类 / 标签筛选 -->
+        <el-radio-group v-model="filterFavorite" size="small" class="filter-row" @change="loadConversations">
+          <el-radio-button value="all">全部</el-radio-button>
+          <el-radio-button value="fav">收藏</el-radio-button>
+        </el-radio-group>
+        <div class="filter-selects">
+          <el-select
+            v-model="filterCategory"
+            placeholder="按分类"
+            size="small"
+            clearable
+            @change="loadConversations"
+          >
+            <el-option
+              v-for="c in filterOptions.categories"
+              :key="c.name"
+              :label="`${c.name}（${c.count}）`"
+              :value="c.name"
+            />
+          </el-select>
+          <el-select
+            v-model="filterTag"
+            placeholder="按标签"
+            size="small"
+            clearable
+            @change="loadConversations"
+          >
+            <el-option
+              v-for="t in filterOptions.tags"
+              :key="t.name"
+              :label="`${t.name}（${t.count}）`"
+              :value="t.name"
+            />
+          </el-select>
+        </div>
         <el-button type="primary" class="new-chat-btn" :icon="Plus" @click="newConversation">
           新建对话
+        </el-button>
+        <el-button class="team-btn" :icon="User" @click="router.push('/team')">
+          团队协作
         </el-button>
       </div>
 
@@ -30,28 +68,53 @@
           @click="selectConversation(conv.id)"
         >
           <ChatDotRound class="conv-icon" />
-          <span class="conv-title">{{ conv.title || '新会话' }}</span>
+          <div class="conv-main">
+            <span class="conv-title">{{ conv.title || '新会话' }}</span>
+            <span
+              v-if="conv.category || (conv.tags || []).length || conv.favorite || conv.share_token"
+              class="conv-meta"
+            >
+              <el-tag v-if="conv.category" size="small" type="warning" effect="plain" round>{{ conv.category }}</el-tag>
+              <el-tag
+                v-for="t in (conv.tags || []).slice(0, 3)"
+                :key="t"
+                size="small"
+                type="info"
+                effect="plain"
+                round
+              >{{ t }}</el-tag>
+              <span v-if="(conv.tags || []).length > 3" class="conv-more-tag">+{{ conv.tags.length - 3 }}</span>
+              <StarFilled v-if="conv.favorite" class="fav-mark" title="已收藏" />
+              <Share v-if="conv.share_token" class="share-mark" title="已开启协作围观" />
+            </span>
+          </div>
           <Star
             class="conv-pin"
             :class="{ 'is-pinned': conv.pinned }"
             :title="conv.pinned ? '取消置顶' : '置顶'"
             @click.stop="togglePin(conv)"
           />
-          <el-dropdown class="conv-del" trigger="click" @command="(cmd) => exportConversation(conv, cmd)" @click.stop>
-            <Download title="导出" @click.stop />
+          <el-dropdown
+            class="conv-more"
+            trigger="click"
+            @command="(cmd) => onConvCommand(conv, cmd)"
+            @click.stop
+          >
+            <MoreFilled title="更多操作" @click.stop />
             <template #dropdown>
               <el-dropdown-menu>
-                <el-dropdown-item command="md">导出 Markdown</el-dropdown-item>
+                <el-dropdown-item command="favorite">
+                  {{ conv.favorite ? '取消收藏' : '加入收藏' }}
+                </el-dropdown-item>
+                <el-dropdown-item command="meta">标签 / 分类</el-dropdown-item>
+                <el-dropdown-item command="share">分享协作室</el-dropdown-item>
+                <el-dropdown-item command="md" divided>导出 Markdown</el-dropdown-item>
                 <el-dropdown-item command="html">导出 HTML</el-dropdown-item>
                 <el-dropdown-item command="pdf">打印为 PDF</el-dropdown-item>
+                <el-dropdown-item command="delete" divided>删除会话</el-dropdown-item>
               </el-dropdown-menu>
             </template>
           </el-dropdown>
-          <el-popconfirm title="删除该会话及其全部消息？" @confirm="deleteConversation(conv.id)">
-            <template #reference>
-              <Delete class="conv-del" @click.stop />
-            </template>
-          </el-popconfirm>
         </div>
         <el-empty v-if="!conversations.length" description="还没有对话" :image-size="60" />
       </el-scrollbar>
@@ -82,16 +145,33 @@
     <!-- ============ 右侧聊天主区 ============ -->
     <main class="main">
       <header class="main-header">
-        <h2>{{ activeTitle || 'EdAgent 本地助手' }}</h2>
-        <el-tag v-if="sending" type="warning" effect="plain" size="small">
-          <el-icon class="is-loading"><Loading /></el-icon>&nbsp;推理中…
-        </el-tag>
+        <div class="header-left">
+          <h2>{{ displayTitle }}</h2>
+          <el-tag v-if="sharedMode" type="success" effect="dark" size="small">协作围观（只读）</el-tag>
+          <span v-if="sharedMode && sharedOwner" class="collab-owner">发起人：{{ sharedOwner }}</span>
+        </div>
+        <div class="header-right">
+          <div v-if="sharedMode" class="collab-members">
+            <el-tooltip
+              v-for="m in roomMembers"
+              :key="m.id"
+              :content="`${m.username}（在线）`"
+              placement="bottom"
+            >
+              <el-avatar :size="24" class="member-avatar">{{ m.username.charAt(0).toUpperCase() }}</el-avatar>
+            </el-tooltip>
+            <span v-if="roomMembers.length" class="member-count">{{ roomMembers.length }} 人在线</span>
+          </div>
+          <el-tag v-if="sending" type="warning" effect="plain" size="small">
+            <el-icon class="is-loading"><Loading /></el-icon>&nbsp;推理中…
+          </el-tag>
+        </div>
       </header>
 
       <el-scrollbar ref="msgScrollRef" class="msg-scroll ea-scroll">
         <div class="msg-inner">
           <!-- 空状态 -->
-          <div v-if="!messages.length" class="welcome">
+          <div v-if="!messages.length && !sharedMode" class="welcome">
             <img src="/favicon.svg" alt="" class="welcome-logo" />
             <h1>你好，{{ username }}</h1>
             <p>我是运行在你本地的 EdAgent，可以直接问答、调用工具，也能基于你上传的文档回答问题。</p>
@@ -173,8 +253,8 @@
         </div>
       </el-scrollbar>
 
-      <!-- 输入区 -->
-      <footer class="composer">
+      <!-- 输入区（协作围观模式下只读，隐藏输入框） -->
+      <footer v-if="!sharedMode" class="composer">
         <div class="composer-box">
           <el-input
             v-model="draft"
@@ -192,6 +272,9 @@
         </div>
         <p class="composer-tip">模型在本地 CPU 运行，首次响应可能需要等待 1-2 分钟。</p>
       </footer>
+      <footer v-else class="composer readonly-bar">
+        <p class="composer-tip">协作围观模式为只读：你可以实时看到发起人的提问与 AI 的逐字输出，但不能在此发送消息。</p>
+      </footer>
     </main>
 
     <!-- ============ 知识库抽屉 ============ -->
@@ -200,17 +283,47 @@
         <el-upload
           drag
           multiple
-          :auto-upload="true"
-          :show-file-list="false"
-          :http-request="uploadKbFile"
+          :auto-upload="false"
+          :show-file-list="true"
+          :on-change="onKbFileSelect"
+          :on-remove="onKbFileRemove"
           accept=".pdf,.docx,.xlsx,.pptx,.csv,.md,.markdown,.txt,.html,.htm"
         >
           <el-icon class="el-icon--upload"><UploadFilled /></el-icon>
-          <div class="el-upload__text">拖拽文件到此处，或<em>点击上传</em></div>
+          <div class="el-upload__text">拖拽文件到此处，或<em>点击选择</em></div>
           <template #tip>
             <div class="el-upload__tip">支持 PDF / Word / Excel / PPT / CSV / Markdown / TXT / HTML，单个文件最大 50MB，仅本人可检索</div>
           </template>
         </el-upload>
+        <el-button
+          v-if="pendingFiles.length"
+          type="primary"
+          size="small"
+          style="margin-top: 8px; width: 100%"
+          :loading="batchRunning"
+          @click="startBatchUpload"
+        >
+          开始导入（{{ pendingFiles.length }} 个文件）
+        </el-button>
+      </div>
+
+      <!-- 批量导入进度 -->
+      <div v-if="batchJob" class="batch-progress" style="margin-bottom: 12px">
+        <el-progress
+          :percentage="batchProgress"
+          :status="batchJob.status === 'failed' ? 'exception' : undefined"
+          :stroke-width="8"
+        />
+        <div style="font-size: 12px; color: var(--ea-text-tertiary); margin-top: 4px">
+          已完成 {{ batchJob.completed_files }}/{{ batchJob.total_files }}，
+          失败 {{ batchJob.failed_files }}
+        </div>
+        <div v-for="(r, i) in (batchJob.results || [])" :key="i" style="display:flex;justify-content:space-between;align-items:center;font-size:12px;padding:2px 0">
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:260px">{{ r.filename }}</span>
+          <el-tag :type="r.status === 'success' ? 'success' : 'danger'" size="small">
+            {{ r.status === 'success' ? `${r.chunks}块` : '失败' }}
+          </el-tag>
+        </div>
       </div>
 
       <div class="kb-stats">
@@ -231,19 +344,93 @@
         </el-table-column>
       </el-table>
     </el-drawer>
+
+    <!-- ============ 标签 / 分类编辑 ============ -->
+    <el-dialog v-model="metaDialog" title="标签 / 分类" width="400px">
+      <el-form label-width="64px">
+        <el-form-item label="分类">
+          <el-select
+            v-model="metaForm.category"
+            placeholder="单选，可直接输入新分类"
+            filterable
+            allow-create
+            default-first-option
+            clearable
+            style="width: 100%"
+          >
+            <el-option
+              v-for="c in filterOptions.categories"
+              :key="c.name"
+              :label="c.name"
+              :value="c.name"
+            />
+          </el-select>
+        </el-form-item>
+        <el-form-item label="标签">
+          <el-select
+            v-model="metaForm.tags"
+            multiple
+            filterable
+            allow-create
+            default-first-option
+            placeholder="多选，可直接输入新标签（最多 10 个）"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="t in filterOptions.tags"
+              :key="t.name"
+              :label="t.name"
+              :value="t.name"
+            />
+          </el-select>
+        </el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="metaDialog = false">取消</el-button>
+        <el-button type="primary" @click="saveMeta">保存</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ============ 协作围观分享 ============ -->
+    <el-dialog v-model="shareDialog" title="分享协作室" width="460px" @closed="stopSharePolling">
+      <p class="share-desc">
+        开启后，任何已登录用户凭下面的链接都能以<strong>只读</strong>方式实时围观本会话——
+        包括发起人的提问与 AI 的逐字输出。
+      </p>
+      <el-input v-if="shareToken" v-model="shareUrl" readonly>
+        <template #append>
+          <el-button :icon="CopyDocument" @click="copyShare">复制</el-button>
+        </template>
+      </el-input>
+      <el-alert
+        v-else
+        type="info"
+        :closable="false"
+        show-icon
+        title="尚未开启分享"
+        description="点击下方「开启分享」生成围观链接。"
+      />
+      <p v-if="shareToken" class="share-viewers">当前在线围观：{{ shareViewers }} 人</p>
+      <template #footer>
+        <el-button v-if="shareToken" type="danger" plain @click="revokeShare">关闭分享</el-button>
+        <el-button v-else type="primary" @click="enableShare">开启分享</el-button>
+        <el-button @click="shareDialog = false">完成</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script setup>
-import { computed, nextTick, onMounted, reactive, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { marked } from 'marked'
 import DOMPurify from 'dompurify'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Plus, Delete, ChatDotRound, ArrowDown, SwitchButton, FolderOpened,
   Promotion, VideoPause, Loading, ChatLineRound, DataAnalysis, Clock,
-  Tools, Document, UploadFilled, Download, Setting, Search, Star,
+  Tools, Document, UploadFilled, Setting, Search, Star, StarFilled, User,
+  MoreFilled, Share, CopyDocument,
 } from '@element-plus/icons-vue'
 import { api, downloadFile, streamChat } from '../api/client'
 import { useAuthStore } from '../stores/auth'
@@ -269,6 +456,33 @@ const kbDrawer = ref(false)
 const kbStats = ref({ documents: 0 })
 const kbFiles = ref([])
 
+// ---------------- 会话组织维度（标签 / 分类 / 收藏） ----------------
+const filterFavorite = ref('all')   // all | fav
+const filterTag = ref('')
+const filterCategory = ref('')
+const filterOptions = ref({ tags: [], categories: [] })
+
+const metaDialog = ref(false)
+const metaConv = ref(null)
+const metaForm = reactive({ category: '', tags: [] })
+
+// ---------------- 协作围观 ----------------
+const sharedMode = ref(false)
+const sharedToken = ref('')
+const sharedOwner = ref('')
+const sharedTitle = ref('')
+const roomMembers = ref([])
+let collabWs = null
+let collabPingTimer = null
+let liveAssistant = null
+
+const shareDialog = ref(false)
+const shareConv = ref(null)
+const shareToken = ref('')
+const shareUrl = ref('')
+const shareViewers = ref(0)
+let shareViewerTimer = null
+
 const routeMap = { simple: '直接回答', tool: '工具调用', rag: '知识库', team: '多Agent协作' }
 const toolNameMap = {
   calculator: '计算器',
@@ -279,6 +493,12 @@ const toolNameMap = {
 
 const activeTitle = computed(
   () => conversations.value.find((c) => c.id === currentId.value)?.title
+)
+
+const displayTitle = computed(() =>
+  sharedMode.value
+    ? sharedTitle.value || '共享会话'
+    : activeTitle.value || 'EdAgent 本地助手'
 )
 
 function renderMarkdown(text) {
@@ -313,11 +533,23 @@ async function scrollToBottom() {
 // ---------------- 会话管理 ----------------
 
 async function loadConversations() {
-  const params = searchQuery.value.trim()
-    ? `?q=${encodeURIComponent(searchQuery.value.trim())}`
-    : ''
-  const data = await api.get(`/api/v1/ui/conversations${params}`)
+  const params = new URLSearchParams()
+  if (searchQuery.value.trim()) params.set('q', searchQuery.value.trim())
+  if (filterTag.value) params.set('tag', filterTag.value)
+  if (filterCategory.value) params.set('category', filterCategory.value)
+  if (filterFavorite.value === 'fav') params.set('favorite', '1')
+  const qs = params.toString()
+  const data = await api.get(`/api/v1/ui/conversations${qs ? `?${qs}` : ''}`)
   conversations.value = data.items
+}
+
+/** 拉取当前用户已用过的分类 / 标签（含计数），供筛选与编辑下拉使用。 */
+async function loadFilters() {
+  try {
+    filterOptions.value = await api.get('/api/v1/ui/conversation-filters')
+  } catch {
+    // 筛选下拉失败不影响会话主流程
+  }
 }
 
 function onSearch() {
@@ -336,6 +568,7 @@ async function togglePin(conv) {
 
 async function selectConversation(id) {
   if (sending.value || id === currentId.value) return
+  if (sharedMode.value) closeCollab()
   try {
     const conv = await api.get(`/api/v1/ui/conversations/${id}`)
     currentId.value = id
@@ -349,6 +582,7 @@ async function selectConversation(id) {
 
 function newConversation() {
   if (sending.value) return
+  if (sharedMode.value) closeCollab()
   currentId.value = null
   messages.value = []
   router.replace({ query: {} })
@@ -360,9 +594,83 @@ async function deleteConversation(id) {
     conversations.value = conversations.value.filter((c) => c.id !== id)
     if (currentId.value === id) newConversation()
     ElMessage.success('会话已删除')
+    loadFilters()
   } catch (err) {
     ElMessage.error(err.message)
   }
+}
+
+/** 会话行「更多操作」下拉路由：收藏 / 标签分类 / 分享 / 导出 / 删除。 */
+function onConvCommand(conv, command) {
+  switch (command) {
+    case 'favorite':
+      toggleFavorite(conv)
+      break
+    case 'meta':
+      openMetaDialog(conv)
+      break
+    case 'share':
+      openShareDialog(conv)
+      break
+    case 'delete':
+      confirmDeleteConversation(conv)
+      break
+    default:
+      exportConversation(conv, command)
+  }
+}
+
+async function toggleFavorite(conv) {
+  try {
+    const result = await api.patch(`/api/v1/ui/conversations/${conv.id}/meta`, {
+      favorite: !conv.favorite,
+    })
+    Object.assign(conv, result.conversation)
+    // 「仅收藏」视图下取消收藏后即刻从列表移除
+    if (filterFavorite.value === 'fav' && !conv.favorite) {
+      conversations.value = conversations.value.filter((c) => c.id !== conv.id)
+    }
+    ElMessage.success(conv.favorite ? '已加入收藏' : '已取消收藏')
+  } catch (err) {
+    ElMessage.error(err.message)
+  }
+}
+
+function openMetaDialog(conv) {
+  metaConv.value = conv
+  metaForm.category = conv.category || ''
+  metaForm.tags = [...(conv.tags || [])]
+  metaDialog.value = true
+}
+
+async function saveMeta() {
+  const conv = metaConv.value
+  if (!conv) return
+  try {
+    const result = await api.patch(`/api/v1/ui/conversations/${conv.id}/meta`, {
+      category: metaForm.category || '',
+      tags: metaForm.tags,
+    })
+    Object.assign(conv, result.conversation)
+    metaDialog.value = false
+    ElMessage.success('标签 / 分类已保存')
+    await Promise.all([loadFilters(), loadConversations()])
+  } catch (err) {
+    ElMessage.error(err.message)
+  }
+}
+
+async function confirmDeleteConversation(conv) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除会话「${conv.title || '新会话'}」及其全部消息？`,
+      '删除确认',
+      { type: 'warning', confirmButtonText: '删除', cancelButtonText: '取消' }
+    )
+  } catch {
+    return // 用户取消
+  }
+  await deleteConversation(conv.id)
 }
 
 /** 导出会话（format: md / html / pdf） */
@@ -378,6 +686,220 @@ async function exportConversation(conv, format = 'md') {
     ElMessage.success(`已导出：${name}`)
   } catch (err) {
     ElMessage.error(err.message)
+  }
+}
+
+// ---------------- 协作围观：分享链接管理 ----------------
+
+function absoluteUrl(path) {
+  return new URL(path, window.location.origin).href
+}
+
+async function openShareDialog(conv) {
+  shareConv.value = conv
+  shareDialog.value = true
+  await refreshShareState()
+  startSharePolling()
+}
+
+/** 拉取当前会话的分享状态（token / 链接 / 在线围观人数）。 */
+async function refreshShareState() {
+  if (!shareConv.value) return
+  try {
+    const data = await api.get(`/api/v1/ui/conversations/${shareConv.value.id}/share`)
+    applyShareState(data)
+  } catch (err) {
+    ElMessage.error(err.message)
+  }
+}
+
+function applyShareState(data) {
+  shareToken.value = data.share_token || ''
+  shareUrl.value = data.share_url ? absoluteUrl(data.share_url) : ''
+  shareViewers.value = data.viewers || 0
+  if (shareConv.value) shareConv.value.share_token = data.share_token || null
+}
+
+async function enableShare() {
+  if (!shareConv.value) return
+  try {
+    applyShareState(await api.post(`/api/v1/ui/conversations/${shareConv.value.id}/share`, {}))
+    ElMessage.success('已开启协作围观')
+  } catch (err) {
+    ElMessage.error(err.message)
+  }
+}
+
+async function revokeShare() {
+  if (!shareConv.value) return
+  try {
+    await api.delete(`/api/v1/ui/conversations/${shareConv.value.id}/share`)
+    applyShareState({ share_token: null, share_url: null, viewers: 0 })
+    ElMessage.success('已关闭分享')
+  } catch (err) {
+    ElMessage.error(err.message)
+  }
+}
+
+async function copyShare() {
+  try {
+    await navigator.clipboard.writeText(shareUrl.value)
+    ElMessage.success('链接已复制')
+  } catch {
+    ElMessage.warning('复制失败，请手动全选链接复制')
+  }
+}
+
+function startSharePolling() {
+  stopSharePolling()
+  shareViewerTimer = setInterval(refreshShareState, 3000)
+}
+
+function stopSharePolling() {
+  clearInterval(shareViewerTimer)
+  shareViewerTimer = null
+}
+
+// ---------------- 协作围观：只读实时视图 ----------------
+
+/** 进入围观模式：拉历史消息 + 建立 WebSocket 订阅。 */
+async function enterSharedMode(token) {
+  try {
+    const conv = await api.get(`/api/v1/ui/shared/${token}`)
+    sharedMode.value = true
+    sharedToken.value = token
+    sharedTitle.value = conv.title
+    sharedOwner.value = conv.owner_username || ''
+    currentId.value = conv.id
+    messages.value = conv.messages.map((m) => ({ ...m, streaming: false }))
+    await scrollToBottom()
+    connectCollab(token)
+  } catch (err) {
+    sharedMode.value = false
+    ElMessage.error(err.message)
+  }
+}
+
+/** 退出围观模式：断开 WebSocket 并清空协作态。 */
+function closeCollab() {
+  if (collabWs) {
+    try {
+      collabWs.close()
+    } catch {
+      // 忽略关闭异常
+    }
+    collabWs = null
+  }
+  clearInterval(collabPingTimer)
+  collabPingTimer = null
+  liveAssistant = null
+  roomMembers.value = []
+  sharedMode.value = false
+  sharedToken.value = ''
+  sharedOwner.value = ''
+  sharedTitle.value = ''
+}
+
+function connectCollab(token) {
+  const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
+  const ws = new WebSocket(`${proto}://${window.location.host}/api/v1/ui/ws/${token}`)
+  collabWs = ws
+
+  ws.onmessage = (event) => {
+    let payload
+    try {
+      payload = JSON.parse(event.data)
+    } catch {
+      return
+    }
+    handleCollabEvent(payload)
+  }
+  ws.onclose = (event) => {
+    if (collabWs !== ws) return
+    collabWs = null
+    clearInterval(collabPingTimer)
+    collabPingTimer = null
+    if (sharedMode.value) {
+      const fatal = event.code === 4401 || event.code === 4404
+      ElMessage.warning(fatal ? '围观链接无效或已被关闭' : '协作连接已断开')
+      if (!fatal) sharedMode.value = false
+    }
+  }
+  // 轻量心跳：避免长空闲连接被中间层回收
+  collabPingTimer = setInterval(() => {
+    if (collabWs && collabWs.readyState === WebSocket.OPEN) collabWs.send('ping')
+  }, 25000)
+}
+
+function handleCollabEvent(event) {
+  switch (event.type) {
+    case 'history':
+      messages.value = (event.messages || []).map((m) => ({ ...m, streaming: false }))
+      sharedTitle.value = event.title || sharedTitle.value
+      sharedOwner.value = event.owner || sharedOwner.value
+      scrollToBottom()
+      break
+    case 'presence':
+      roomMembers.value = event.members || []
+      break
+    case 'join':
+      ElMessage.info(`${event.username} 加入了围观`)
+      break
+    case 'leave':
+      ElMessage.info(`${event.username} 离开了围观`)
+      break
+    case 'turn_start':
+      // 发起人开始新一轮问答：插入提问 + 空的流式回复占位
+      liveAssistant = reactive({
+        role: 'assistant',
+        content: '',
+        reasoning: '',
+        sources: [],
+        tool_results: [],
+        route: null,
+        streaming: true,
+      })
+      messages.value.push({ role: 'user', content: event.message })
+      messages.value.push(liveAssistant)
+      sending.value = true
+      scrollToBottom()
+      break
+    case 'reasoning':
+      if (liveAssistant) {
+        liveAssistant.reasoning += event.delta || ''
+        scrollToBottom()
+      }
+      break
+    case 'token':
+      if (liveAssistant) {
+        liveAssistant.content += event.delta || ''
+        scrollToBottom()
+      }
+      break
+    case 'turn_done':
+      if (liveAssistant) {
+        liveAssistant.content = event.answer || liveAssistant.content
+        liveAssistant.route = event.route
+        liveAssistant.sources = event.sources || []
+        liveAssistant.tool_results = event.tool_results || []
+        liveAssistant.streaming = false
+      }
+      liveAssistant = null
+      sending.value = false
+      scrollToBottom()
+      break
+    case 'turn_error':
+      if (liveAssistant) {
+        liveAssistant.streaming = false
+        liveAssistant.content += `\n\n> ⚠️ ${event.message}`
+      }
+      liveAssistant = null
+      sending.value = false
+      ElMessage.error(event.message)
+      break
+    case 'error':
+      ElMessage.error(event.message)
+      break
   }
 }
 
@@ -398,6 +920,10 @@ function quickSend(text) {
 }
 
 async function send() {
+  if (sharedMode.value) {
+    ElMessage.info('协作围观模式为只读，无法发送消息')
+    return
+  }
   const text = draft.value.trim()
   if (!text || sending.value) return
   draft.value = ''
@@ -473,16 +999,59 @@ async function loadKb() {
   }
 }
 
-async function uploadKbFile(options) {
+// ==================== 知识库批量导入 ====================
+
+const pendingFiles = ref([])
+const batchJob = ref(null)
+let batchPollTimer = null
+
+const batchRunning = computed(() => batchJob.value && batchJob.value.status === 'running')
+const batchProgress = computed(() => {
+  if (!batchJob.value) return 0
+  const total = batchJob.value.total_files || 1
+  return Math.round(((batchJob.value.completed_files + batchJob.value.failed_files) / total) * 100)
+})
+
+function onKbFileSelect(uploadFile) {
+  // 收集待上传文件
+  pendingFiles.value.push(uploadFile.raw)
+}
+
+function onKbFileRemove(uploadFile) {
+  pendingFiles.value = pendingFiles.value.filter(f => f !== uploadFile.raw)
+}
+
+async function startBatchUpload() {
+  if (!pendingFiles.value.length) return
   const formData = new FormData()
-  formData.append('file', options.file)
+  for (const f of pendingFiles.value) formData.append('files', f)
   try {
-    const result = await api.upload('/api/v1/rag/documents', formData)
-    ElMessage.success(`「${result.original_name}」入库成功，${result.chunks} 个分块`)
-    await loadKb()
+    const result = await api.upload('/api/v1/rag/batch', formData)
+    batchJob.value = result
+    ElMessage.success(`已创建批量任务，共 ${result.total_files} 个文件`)
+    pendingFiles.value = []
+    // 清空 el-upload 文件列表
+    pollBatchStatus(result.job_id)
   } catch (err) {
     ElMessage.error(err.message)
   }
+}
+
+function pollBatchStatus(jobId) {
+  clearInterval(batchPollTimer)
+  batchPollTimer = setInterval(async () => {
+    try {
+      const job = await api.get(`/api/v1/rag/batch/${jobId}`)
+      batchJob.value = job
+      if (job.status !== 'running') {
+        clearInterval(batchPollTimer)
+        ElMessage.success(`批量导入完成：成功 ${job.completed_files}，失败 ${job.failed_files}`)
+        await loadKb()
+      }
+    } catch {
+      clearInterval(batchPollTimer)
+    }
+  }, 1000)
 }
 
 async function deleteKbFile(filename) {
@@ -498,11 +1067,24 @@ async function deleteKbFile(filename) {
 // ---------------- 初始化（支持刷新恢复） ----------------
 
 onMounted(async () => {
-  await loadConversations()
+  await Promise.all([loadConversations(), loadFilters()])
+  // 分享链接进入协作围观（只读）
+  const shareQuery = route.query.share
+  if (typeof shareQuery === 'string' && shareQuery) {
+    await enterSharedMode(shareQuery)
+    return
+  }
   const cid = route.query.c
   if (cid && conversations.value.some((c) => c.id === cid)) {
     await selectConversation(cid)
   }
+})
+
+onUnmounted(() => {
+  clearTimeout(searchTimer)
+  clearInterval(batchPollTimer)
+  clearInterval(shareViewerTimer)
+  closeCollab()
 })
 </script>
 
@@ -542,9 +1124,34 @@ onMounted(async () => {
 .new-chat-btn {
   width: 100%;
 }
+.team-btn {
+  width: 100%;
+  margin-bottom: 8px;
+}
 .search-input {
   width: 100%;
   margin-bottom: 8px;
+}
+
+/* 会话组织维度：筛选控件 */
+.filter-row {
+  width: 100%;
+  margin-bottom: 6px;
+}
+.filter-row :deep(.el-radio-button) {
+  flex: 1;
+}
+.filter-row :deep(.el-radio-button__inner) {
+  width: 100%;
+}
+.filter-selects {
+  display: flex;
+  gap: 6px;
+  margin-bottom: 10px;
+}
+.filter-selects :deep(.el-select) {
+  flex: 1;
+  min-width: 0;
 }
 .conv-scroll {
   flex: 1;
@@ -572,23 +1179,59 @@ onMounted(async () => {
   flex-shrink: 0;
   font-size: 15px;
 }
-.conv-title {
+.conv-main {
   flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.conv-title {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.conv-del {
+.conv-meta {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.conv-meta :deep(.el-tag) {
+  height: 17px;
+  padding: 0 6px;
+  font-size: 11px;
+  line-height: 15px;
+  max-width: 72px;
+  overflow: hidden;
+}
+.conv-more-tag {
+  font-size: 11px;
+  color: #97a0b8;
+}
+.fav-mark {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #e6a23c;
+}
+.share-mark {
+  flex-shrink: 0;
+  font-size: 12px;
+  color: #67c23a;
+}
+.conv-more {
   opacity: 0;
   font-size: 14px;
   color: #97a0b8;
   transition: opacity 0.15s;
+  flex-shrink: 0;
 }
-.conv-item:hover .conv-del {
+.conv-item:hover .conv-more {
   opacity: 1;
 }
-.conv-del:hover {
-  color: #f56c6c;
+.conv-more:hover {
+  color: var(--ea-primary);
 }
 .conv-pin {
   opacity: 0;
@@ -654,6 +1297,43 @@ onMounted(async () => {
   margin: 0;
   font-size: 16px;
   font-weight: 600;
+}
+.header-left,
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+.header-left h2 {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.collab-owner {
+  font-size: 12px;
+  color: var(--ea-text-soft);
+}
+/* 协作围观在线成员 */
+.collab-members {
+  display: flex;
+  align-items: center;
+}
+.collab-members .member-avatar {
+  background: #67c23a;
+  color: #fff;
+  font-size: 12px;
+  font-weight: 700;
+  margin-left: -6px;
+  border: 2px solid var(--ea-panel);
+}
+.collab-members .member-avatar:first-child {
+  margin-left: 0;
+}
+.member-count {
+  margin-left: 8px;
+  font-size: 12px;
+  color: var(--ea-text-soft);
 }
 .msg-scroll {
   flex: 1;
@@ -869,6 +1549,25 @@ onMounted(async () => {
   margin: 7px auto 0;
   text-align: center;
   font-size: 12px;
+  color: var(--ea-text-soft);
+}
+/* 协作围观只读提示条 */
+.readonly-bar {
+  border-top: 1px solid var(--ea-border);
+}
+.readonly-bar .composer-tip {
+  color: #67c23a;
+}
+/* 分享弹窗 */
+.share-desc {
+  margin: 0 0 14px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ea-text-soft);
+}
+.share-viewers {
+  margin: 12px 0 0;
+  font-size: 13px;
   color: var(--ea-text-soft);
 }
 

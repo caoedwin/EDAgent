@@ -78,5 +78,21 @@ def knowledge_search(query: str, config: RunnableConfig) -> str:
 
 
 # LangGraph 工具节点按名称索引
-TOOLS = [calculator, current_time, word_count, knowledge_search]
+_TOOLS_BUILTIN = [calculator, current_time, word_count, knowledge_search]
+
+
+def _load_plugin_tools() -> list:
+    """加载外部插件工具（延迟导入避免循环依赖）。"""
+    try:
+        from app.plugins.loader import load_plugins
+
+        return load_plugins()
+    except Exception:
+        import logging
+
+        logging.getLogger("edagent.plugins").exception("插件加载失败")
+        return []
+
+
+TOOLS = [*_TOOLS_BUILTIN, *_load_plugin_tools()]
 TOOL_MAP = {tool_item.name: tool_item for tool_item in TOOLS}

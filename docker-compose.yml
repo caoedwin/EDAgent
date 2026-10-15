@@ -115,10 +115,21 @@ services:
       - "127.0.0.1:${AGENT_API_PORT:-18080}:8080"
     volumes:
       - ingest_data:/data/ingest
+      # 插件目录：进程内 Python 插件（上传/删除后需重启 agent-api 生效）
+      - ./plugins:/app/plugins
+      # Team OS 沙箱：允许 agent-api 通过宿主机 Docker daemon 创建隔离容器
+      # 注意：等价于赋予该容器宿主机 root 权限，仅适用于本地自托管场景
+      - /var/run/docker.sock:/var/run/docker.sock
+    # Docker Desktop 下 socket 属 root:root 0660，非 root 用户需补充 gid 0 才能访问
+    group_add:
+      - "0"
     environment:
       AGENT_LLM_BASE_URL: ${LLM_BASE_URL:-http://ollama:11434/v1}
       AGENT_LLM_API_KEY: ${LLM_API_KEY:-ollama}
       AGENT_LLM_MODEL: ${LLM_MODEL:-deepseek-r1:8b}
+      # CPU 下 R1 长思考常超 180s；默认超时会中断推理（CPU 建议 300-600s）
+      AGENT_LLM_TIMEOUT: ${LLM_TIMEOUT:-180}
+      AGENT_LLM_MAX_RETRIES: ${LLM_MAX_RETRIES:-2}
 
       AGENT_EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-http://ollama:11434/v1}
       AGENT_EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-ollama}
@@ -132,6 +143,8 @@ services:
       AGENT_API_KEY: ${AGENT_API_KEY}
       AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET}
       AGENT_MAX_AGENT_STEPS: "15"
+      # Team OS：CPU 下 Ollama 单槽推理，并发任务会在服务端排队进而超时，CPU 建议串行
+      AGENT_TEAM_MAX_PARALLEL: ${TEAM_MAX_PARALLEL:-2}
       AGENT_ENV: production
     restart: unless-stopped
 

@@ -1,10 +1,12 @@
 """业务路由：简单问答 / LangGraph Agent / RAG 文档管理与问答。"""
 
+import asyncio
 import uuid
 
 from fastapi import APIRouter, File, HTTPException, Request, UploadFile
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app import db
 from app.api.schemas import (
     AgentRequest,
     AgentResponse,
@@ -16,9 +18,10 @@ from app.api.schemas import (
 )
 from app.config import settings
 from app.llm.client import chat_invoke
+from app.rag.batch import run_batch_ingest
 from app.rag.ingest import collection_stats, delete_document, ingest_document
 from app.rag.retriever import format_context, retrieve
-from app.security.web_auth import request_owner_id
+from app.security.web_auth import request_owner_id, session_user_id
 
 router = APIRouter(prefix="/api/v1")
 
@@ -139,3 +142,57 @@ def rag_query(payload: RagQueryRequest, request: Request) -> RagQueryResponse:
         sources=sources,
         model=settings.llm_model if payload.answer else None,
     )
+
+
+# ==================== 批量导入 ====================
+
+_MAX_BATCH_FILES = 20
+
+
+@router.post("/rag/batch", tags=["rag"])
+async def batch_upload_documents(
+    request: Request,
+    files: list[UploadFile] = File(...),
+) -> dict:
+    """批量上传文档（后台异步摄取）。需登录，文档归属当前用户。"""
+    user_id = session_user_id(request)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="请先登录")
+
+    if len(files) > _MAX_BATCH_FILES:
+        raise HTTPException(status_code=400, detail=f"单次最多上传 {_MAX_BATCH_FILES} 个文件")
+
+    job_id = str(uuid.uuid4())
+    pool = request.app.state.pool
+
+    # 读取所有文件内容到内存
+    file_data: list[tuple[str, bytes]] = []
+    for f in files:
+        content = await f.read()
+        if not content:
+            continue
+        if len(content) > _MAX_UPLOAD_BYTES:
+            raise HTTPException(status_code=413, detail=f"文件 {f.filename} 超过 50MB 上限")
+        file_data.append((f.filename or "unknown", content))
+
+    if not file_data:
+        raise HTTPException(status_code=400, detail="没有有效的上传文件")
+
+    db.create_ingest_job(pool, job_id=job_id, user_id=user_id, total_files=len(file_data))
+
+    # 后台异步摄取
+    asyncio.create_task(run_batch_ingest(pool, job_id, user_id, file_data))
+
+    return {"job_id": job_id, "total_files": len(file_data), "status": "running"}
+
+
+@router.get("/rag/batch/{job_id}", tags=["rag"])
+def get_batch_job(job_id: str, request: Request) -> dict:
+    """查询批量导入任务状态。"""
+    user_id = session_user_id(request)
+    if user_id is None:
+        raise HTTPException(status_code=401, detail="请先登录")
+    job = db.get_ingest_job(request.app.state.pool, job_id, user_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    return job

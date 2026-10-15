@@ -46,6 +46,13 @@ class Settings(BaseSettings):
 
     # ---------- 多 Agent 协作 ----------
     team_max_rounds: int = 2
+    # Team OS：并发调度
+    team_max_parallel: int = 2  # CPU 模式建议 1-2，在线 API 可 3-4
+    # Team OS：Docker 沙箱
+    # 默认用本平台镜像：本地必定存在，避免依赖镜像源（python:3.14-slim 仅在 BuildKit 缓存中）
+    team_sandbox_image: str = "edagent-agent-api:0.1.0"
+    team_sandbox_timeout: int = 120  # 沙箱容器执行超时（秒）
+    team_sandbox_enabled: bool = True  # 是否启用 Docker 沙箱
     team_planner_prompt: str = (
         '你是分析小组的"规划者"。把用户的问题拆解为 2-4 个关键分析要点，'
         "帮助执行者给出全面、有深度的回答。只输出要点列表，不要回答问题本身。格式：\n"
@@ -64,6 +71,10 @@ class Settings(BaseSettings):
     rag_chunk_overlap: int = 50
     rag_top_k: int = 5
     rag_mmr_lambda_mult: float = 0.5
+    # 检索类型：mmr（默认，带多样性）/ similarity（纯相似度）/ similarity_score_threshold（带分数阈值过滤）
+    rag_search_type: str = "mmr"
+    # 相似度分数阈值（0.0-1.0），仅当 rag_search_type = "similarity_score_threshold" 时生效
+    rag_score_threshold: float = 0.0
 
     # ---------- 可观测性 ----------
     otel_exporter_otlp_endpoint: str = ""  # 为空则不向 collector 导出
