@@ -1,0 +1,61 @@
+# ============================================================
+# EdAgent 云端模式 override：个人 VPS + 云端 LLM API
+#
+# 启动命令（务必带 --env-file，否则读到本地 .env）：
+#   docker compose --env-file .env.cloud \
+#     -f docker-compose.yml -f docker-compose.cloud.yml up -d
+#
+# 与本地模式的关系：只裁剪/覆盖，不改 docker-compose.yml；
+# 本地启动命令不受影响，随时可切回。
+#
+# 依赖：Docker Compose v2.24+（用到 !override / !reset 标签）
+# ============================================================
+
+services:
+  # ---------- 禁用本地 Ollama：LLM / Embedding 均走云端 API ----------
+  # profiles 机制：不带 --profile local-only 启动时本服务不运行
+  ollama:
+    profiles: ["local-only"]
+
+  # ---------- 可观测性组件默认关闭（个人使用裁掉，省约 800MB 内存）----------
+  # 需要排障时启用：
+  #   docker compose --env-file .env.cloud -f docker-compose.yml \
+  #     -f docker-compose.cloud.yml --profile observability up -d
+  otel-collector:
+    profiles: ["observability"]
+  jaeger:
+    profiles: ["observability"]
+  prometheus:
+    profiles: ["observability"]
+  grafana:
+    profiles: ["observability"]
+
+  agent-api:
+    # 去掉对 ollama 的依赖（!override 整体替换，不与基础文件合并）
+    depends_on: !override
+      chromadb:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      # OTel collector 未启动：置空即不导出（config.py 有空值短路逻辑）
+      AGENT_OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      # Embedding 换云端模型后向量维度变化，必须用新 collection（旧向量失效）
+      AGENT_COLLECTION_NAME: agent_edagent_cloud
+      # 云端不挂 docker.sock，Team OS 的 Docker 沙箱随之禁用（攻击面最小化）
+      AGENT_TEAM_SANDBOX_ENABLED: "false"
+      # LLM / Embedding 的 BASE_URL/API_KEY/MODEL 由 .env.cloud 插值注入，无需在此覆盖
+    volumes: !override
+      - ingest_data:/data/ingest
+      # 插件目录：进程内 Python 插件（上传/删除后需重启 agent-api 生效）
+      - ./plugins:/app/plugins
+      # 注意：docker.sock 挂载已移除；如需 Team OS 沙箱请改回基础文件写法并开 TEAM_SANDBOX_ENABLED
+    group_add: !reset []
+
+  nginx:
+    # 云端对公网暴露 80（基础文件绑定的是 127.0.0.1，必须整体替换）
+    ports: !override
+      - "${NGINX_HOST_PORT:-80}:80"
+    # TLS：当前 nginx.conf 只 listen 80。配好域名后参考交付说明加 443 + 证书。
