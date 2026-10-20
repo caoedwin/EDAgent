@@ -35,7 +35,9 @@ from app.security.web_auth import has_valid_api_key, session_user_id
 from app.team.roles import sync_roles_to_db
 
 # 无需登录即可访问的 API（注册 / 登录）
-PUBLIC_API_PATHS = frozenset({"/api/v1/auth/register", "/api/v1/auth/login"})
+PUBLIC_API_PATHS = frozenset(
+    {"/api/v1/auth/register", "/api/v1/auth/login", "/api/v1/auth/config"}
+)
 STATIC_DIR = Path(settings.static_dir)
 
 

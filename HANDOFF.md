@@ -1,7 +1,72 @@
 # EdAgent 会话交接文档
 
-> 写给下一个完全没有上下文的会话。生成时间：2026-10-13。
-> 交接前已重新验证容器状态，信息属实。本轮新增 Team OS（多角色协作子系统）阶段 1-3。
+> 写给下一个完全没有上下文的会话。生成时间：2026-10-13；最近更新：**2026-10-20（新增云端模式部署支持 + 公网注册开关）**。
+> 交接前已重新验证容器状态，信息属实。本轮新增 Team OS（多角色协作子系统）阶段 1-3、Phase 3 能力扩展、会话组织与协作围观、云端部署支持与注册开关。
+
+## 0. 运行备忘（运行命令 / 页面网址 / 测试账号）
+
+### 0.1 运行命令
+
+```powershell
+# 本地模式（Windows + Docker Desktop，CPU 推理，含容器内 Ollama）
+docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
+
+# 云端模式（个人 VPS + 云端 LLM API，不含 Ollama；必须带 --env-file）
+docker compose --env-file .env.cloud -f docker-compose.yml -f docker-compose.cloud.yml up -d
+
+# 改了后端/前端代码后必须重建（下面以本地为例，云端把两个 -f 与 --env-file 换成云端那套）
+docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d --build agent-api
+
+# 查看状态 / 停机
+docker compose -f docker-compose.yml -f docker-compose.cpu.yml ps
+docker compose -f docker-compose.yml -f docker-compose.cpu.yml down
+
+# 云端临时启用可观测性组件（otel/jaeger/prometheus/grafana）
+docker compose --env-file .env.cloud -f docker-compose.yml -f docker-compose.cloud.yml --profile observability up -d
+```
+
+GPU 模式把 `docker-compose.cpu.yml` 换成 GPU 覆盖文件（需 NVIDIA 驱动 + nvidia-container-toolkit）。
+
+### 0.2 页面网址 —— 本地模式
+
+| 用途                  | 地址                            | 账号 / 密钥                                        |
+| ------------------- | ----------------------------- | ---------------------------------------------- |
+| Web UI（主入口，Nginx）   | <http://localhost:18088/>     | `testuser` / `test123456`（admin 角色）            |
+| API 直连（含 /docs Swagger） | <http://localhost:18080/docs> | Bearer API Key `edagent-sk-7f3c9a21e8b44d60a5c28b17f6d309e2` |
+| Grafana             | <http://localhost:13000/>     | `admin` / `Gr@f_5d8a2f3c71e9`                  |
+| Jaeger              | <http://localhost:16686/>     | 无                                              |
+| Prometheus          | <http://localhost:19090/>     | 无                                              |
+
+其余端口（**全部仅绑定 127.0.0.1，不对外**）：Postgres 15432、Redis 16379、ChromaDB 18000、Ollama 11534。
+
+### 0.3 页面网址 —— 云端模式
+
+| 用途           | 地址                                                                 |
+| ------------ | ------------------------------------------------------------------ |
+| Web UI + API | `http://<VPS_IP>/`（`NGINX_HOST_PORT=80`；配好域名与证书后走 443）              |
+| 数据库等其余服务     | 同样只绑 `127.0.0.1`，需用 SSH 隧道访问（**安全组不要放开**）                            |
+| 可观测性         | 默认不启动；加 `--profile observability` 后用 SSH 隧道访问 13000/16686/19090 |
+
+### 0.4 测试账号
+
+| 用户名        | 密码            | 角色    | 说明                              |
+| ---------- | ------------- | ----- | ------------------------------- |
+| `testuser` | `test123456`  | admin | 主测试账号，本地库已存在，日常用它登录             |
+| `e2e_guest` | `guest123456` | user  | 2026-10-15 协作围观 E2E 测试时注册      |
+| `testuser_b` | 未记录           | user  | 早期测试创建，密码未留存                    |
+| `edwin`      | 未记录           | admin | 早期测试创建，密码未留存                    |
+
+- 密码用 PBKDF2 哈希存储，**无法从数据库反推**；忘记密码只能重新注册或删除该账号重建。
+- **云端是新库**：以上账号在云端不存在，需自行注册——**首个注册者自动成为 admin**。
+- 同一账号开多个浏览器标签页进入协作围观时，在线成员**按用户 id 去重只算 1 人**。
+
+### 0.5 其他凭据（本地 `.env`）
+
+- Postgres：用户 `agent` / 密码 `EdPg_9f3c7a21e8b44d60a5c2` / 库 `ai_agent`
+- 脚本调用用 Bearer API Key：`edagent-sk-7f3c9a21e8b44d60a5c28b17f6d309e2`
+- 登录 Cookie 签名密钥：`.env` 的 `AGENT_SESSION_SECRET`
+
+> ⚠️ 本节与 `.env` 均为**明文凭据**。云端部署前必须全部更换（`.env.cloud` 里已标注 `CHANGE_ME`），且不要把 `.env` / `.env.cloud` / 本文件提交到公共仓库。
 
 ## 1. 我们在做什么任务
 
@@ -18,7 +83,7 @@
 
 ## 2. 当前状态：已完成并全部验证通过
 
-截至交接时（2026-10-13）用 `docker ps` 验证：**10 个 edagent 容器全部 Up，其中带健康检查的均为 healthy**（另有一组与本项目无关的 `dev_*` 容器）。
+截至交接时用 `docker ps` 验证：**edagent 各容器全部 Up，其中带健康检查的均为 healthy**（另有一组与本项目无关的 `dev_*` 容器）。**入口地址与凭据以第 0.2 节为准**（本节旧表仅为历史留存）。
 
 | 入口                              | 地址                        | 凭据                                                           |
 | ------------------------------- | ------------------------- | ------------------------------------------------------------ |
@@ -38,7 +103,7 @@
 6. RAG 按用户隔离：上传 PDF/DOCX/XLSX/MD/TXT/HTML → 分块 → ChromaDB（xlsx 按工作表分页），metadata `owner` 过滤；Cookie 用户只看自己的，API Key 全局
 7. SSE 流式取消：客户端断连（停止按钮/关页面）→ 取消图执行与 LLM 调用，已生成部分答案自动落库
 8. 多 Agent 协作子图：planner → worker(ReAct) ↔ tools → reviewer（approve/revise，最多 2 轮），复杂分析题由路由选中 `team` 分支
-9. 双通道鉴权：Cookie Session（UI 用户）+ Bearer API Key（脚本），公开白名单仅 register/login
+9. 双通道鉴权：Cookie Session（UI 用户）+ Bearer API Key（脚本），公开白名单仅 register/login/config
 10. 可观测性：Grafana 仪表盘自动供给，Jaeger 链路追踪正常
 11. 项目内沉淀了 5 个 Trae Skill（`.trae/skills/`），其中 `edagent-user-ui-sse` 是用户系统/SSE 排错指南
 12. 管理后台页面：前端 `/admin` 路由（Admin.vue），用户列表表格 + 角色切换 + 删除，路由守卫 `requiresAdmin`
@@ -65,6 +130,8 @@
 
 25. **会话标签分类（多维度组织会话）**：conversations 表新增 `tags JSONB` / `category` / `favorite` 列（幂等迁移写在 `app/db.py` 初始化 SQL，索引 `idx_conversations_share_token` 亦在此）。接口：`PATCH /api/v1/ui/conversations/{id}/meta` 局部更新（tags / category / favorite **只改请求体里显式出现的字段**，`tags: []` 清空标签、`category: ""` 清空分类）、`GET /api/v1/ui/conversations?tag=&category=&favorite=` 组合筛选（标签走 `tags @> %s::jsonb` 包含查询）、`GET /api/v1/ui/conversation-filters` 聚合分类/标签计数。前端 Chat.vue 侧栏新增「全部/收藏」单选 + 「按分类/按标签」下拉，会话行显示分类/标签徽标、收藏星标、分享标记，更多菜单含收藏、标签分类、分享、导出、删除。
 26. **WebSocket 实时多用户协作（只读围观）**：`POST /conversations/{id}/share` 生成 `share_token` → 分享链接 `/?c=<id>&share=<token>`（任何人登录后凭链接只读围观）；`GET /api/v1/ui/shared/{token}` 读共享会话+消息；`WS /api/v1/ui/ws/{token}` 加入房间，事件协议 `history → presence/join/leave → turn_start → reasoning/token → turn_done/turn_error`；`DELETE .../share` 关闭分享并**强制解散房间**（`hub.close_room()` 推 error 事件 + close 4404）。广播用进程内单例 `app/api/broadcast.py::CollaborationHub`（uvicorn 单 worker 成立；若将来改多 worker 必须换成外部分发）。`chat/stream` 的 producer 每轮问答向房间广播 `turn_start` / `token` / `reasoning` / `turn_done`（中断时下发含部分答案的 turn_done，异常下发 turn_error）。在线成员**按用户 id 去重**（同一账号开多个标签页只算 1 人）。前端 Chat.vue 协作态：只读视图（无输入框，底部只读提示条）+ 顶部在线成员头像与「N 人在线」+ 实时打字机效果。
+27. **公网注册开关（2026-10-19）**：Settings 新增 `allow_register`（环境变量 `AGENT_ALLOW_REGISTER`，默认 true）。`app/api/auth_routes.py::_register_open(pool)` 的规则是——显式开启即放行；关闭时若**库中尚无任何用户**仍放行（`db.has_any_user()`），用于云端空库引导首个 admin，**注册成功后入口自动失效**。关闭时 `POST /auth/register` 返回 403「本站已关闭注册，请联系管理员」；新增公开端点 `GET /api/v1/auth/config` 返回 `{allow_register}`（已加入 `main.py` 的 `PUBLIC_API_PATHS`），前端 auth store 的 `allowRegister` + 路由守卫据此隐藏 `/register` 入口与登录页注册链接。编排侧：基础 compose 默认 `${AGENT_ALLOW_REGISTER:-true}`，掩盖文件 `docker-compose.cloud.yml` 默认 `${AGENT_ALLOW_REGISTER:-false}`（云端更安全），`.env.cloud` 显式写 `AGENT_ALLOW_REGISTER=false`。
+28. **云端模式部署支持（2026-10-19，个人 VPS + 云端 LLM API）**：新增掩盖文件 `docker-compose.cloud.yml` 与 `.env.cloud` 模板，本地/云端**同一份代码双模式并存**（只换 `--env-file` 与 `-f` 参数，零代码改动）。云端模式做的事：`ollama` 与可观测组件（otel/jaeger/prometheus/grafana）改用 `profiles` 默认不启动（后者需要时加 `--profile observability`）；agent-api 的 `depends_on` 用 `!override` 去掉 ollama 依赖、`volumes` 用 `!override` **移除 `docker.sock`**（沙箱随之禁用 `AGENT_TEAM_SANDBOX_ENABLED=false`）、`group_add: !reset []`；nginx 端口改为 `${NGINX_HOST_PORT:-80}:80` 对公网暴露；`AGENT_COLLECTION_NAME=agent_edagent_cloud`（换云端 embedding 后**向量维度变化、旧向量失效，需重新导入文档**）；`AGENT_ALLOW_REGISTER` 默认 false。**依赖 Docker Compose v2.24+**——`!override`/`!reset` 是整体替换而非默认合并，旧版本会静默得到错误结果。详见 PROJECT.md 第 6.4 / 14.6 节。
 
 ## 3. 当前卡在哪
 
@@ -81,7 +148,7 @@ docker exec edagent-postgres psql -U agent -d ai_agent -c "SELECT role,status,ti
 需要知道的环境事实：
 
 - **项目不是 git 仓库**（无 `.git`），改动前考虑备份，回滚只能靠手动副本。
-- agent-api 镜像最新于 2026-10-15 重建（含 Phase 3：插件系统 + 批量导入 + RAG 调参，以及两个扩展：会话标签分类 + WebSocket 协作围观）；改了后端/前端代码后需要重建：`docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d --build agent-api`。**只改 .py 不重建的话容器里跑的还是旧代码**——曾因此误以为修复已生效，实际容器内仍是旧代码（用 `docker cp edagent-agent-api:/app/app/team/scheduler.py <tmp>` 拷出来核对可确认）。**另外：docker build 在启动时读取构建上下文，若在构建过程中又改了源码，那一轮构建不会包含新改动**（本轮实际踩到过一次，用 `docker exec edagent-agent-api grep <新代码特征> app/...` 核对后才补建）。
+- agent-api 镜像最新于 **2026-10-20** 重建（含 Phase 3：插件系统 + 批量导入 + RAG 调参；扩展：会话标签分类 + WebSocket 协作围观 + 公网注册开关）；改了后端/前端代码后需要重建：`docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d --build agent-api`。**只改 .py 不重建的话容器里跑的还是旧代码**——曾因此误以为修复已生效，实际容器内仍是旧代码（用 `docker cp edagent-agent-api:/app/app/team/scheduler.py <tmp>` 拷出来核对可确认）。**另外：docker build 在启动时读取构建上下文，若在构建过程中又改了源码，那一轮构建不会包含新改动**（本轮实际踩到过一次，用 `docker exec edagent-agent-api grep <新代码特征> app/...` 核对后才补建）。
 
 ## 4. 下一步计划（候选，用户尚未指定优先级）
 
@@ -93,11 +160,15 @@ docker exec edagent-postgres psql -U agent -d ai_agent -c "SELECT role,status,ti
 
 **会话标签分类 + WebSocket 实时多用户协作（只读围观）两个扩展已于 2026-10-15 实现并端到端验证通过**（25 项接口/协议断言全通过 + 浏览器渲染核对通过），详见功能清单 25/26。
 
-来自 PROJECT.md 第 18 节的剩余候选方向：
+**云端模式部署支持（2026-10-19）+ 公网注册开关（2026-10-19/20）已实现并验证**（见功能清单 28 / 27）：云端 compose 与 `.env.cloud` 模板、本地/云端双模式并存；注册开关的 4 种判定组合 + 真实 HTTP 链路（关闭时 403 带中文提示、登录不受影响、被拒账号不落库）全部验证通过。**但尚未真正部署到 VPS**——用户计划改为个人外网使用，待购买 VPS、填好 `.env.cloud` 密钥、配好 TLS 后执行云端启动命令；届时知识库需重新导入（embedding 维度由 768 变 1024）。
 
-- **模型升级**：改 `.env` 的 `LLM_MODEL`（如 qwen2.5:14b），Ollama 自动拉取；r1:8b 在 CPU 上思考偏慢，升级收益大
-- **多语言界面**：i18n 支持中英文切换
-- （已完成：「会话标签分类」「WebSocket 实时多用户协作」见功能 25/26）
+来自 PROJECT.md 第 18 节的候选方向（与 PROJECT.md 保持同步）：
+
+- **模型微调 / RAG 调优**：Ollama Modelfile 自定义微调，或升级到更大参数模型（如 qwen2.5:14b）提升命中率
+- **多语言界面（i18n）**：中英文等多语言切换
+- **Team OS 产品化**：角色可视化管理页（自定义 system_prompt/工具白名单）、任务 DAG 图形化展示、产物版本 diff 对比、通知 Webhook/邮件外发、团队运行成本与耗时统计
+- **Team OS 算力升级**：GPU 模式或接入在线 API——「接入在线 API」已由云端模式提供路径（`.env.cloud` 填云端 LLM/Embedding Key），但仍需实测 6 角色协作是否真能跑通
+- （已完成：「会话标签分类」「WebSocket 实时多用户协作」「云端模式部署」「公网注册开关」，见功能 25/26/27/28）
 
 **注意：先问用户想做什么，不要自作主张选一个开始。**
 

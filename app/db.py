@@ -209,6 +209,12 @@ def create_user(pool: ConnectionPool, username: str, password: str) -> dict[str,
     return {"id": row[0], "username": row[1], "role": row[2], "created_at": row[3]}
 
 
+def has_any_user(pool: ConnectionPool) -> bool:
+    """库中是否已存在用户（用于「开放注册」开关的引导放行判断）。"""
+    with pool.connection() as conn:
+        return conn.execute("SELECT 1 FROM users LIMIT 1").fetchone() is not None
+
+
 def authenticate(pool: ConnectionPool, username: str, password: str) -> dict[str, Any]:
     with pool.connection() as conn:
         row = conn.execute(

@@ -40,7 +40,7 @@ const router = createRouter({
 
 router.beforeEach(async (to) => {
   const auth = useAuthStore()
-  if (!auth.ready) await auth.fetchMe()
+  if (!auth.ready) await Promise.all([auth.fetchMe(), auth.fetchAuthConfig()])
 
   if (to.meta.requiresAuth && !auth.isLoggedIn) {
     return { name: 'login', query: { redirect: to.fullPath } }
@@ -50,6 +50,9 @@ router.beforeEach(async (to) => {
   }
   if (to.meta.guestOnly && auth.isLoggedIn) {
     return { name: 'chat' }
+  }
+  if (to.name === 'register' && !auth.allowRegister) {
+    return { name: 'login' }
   }
 })
 

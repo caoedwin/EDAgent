@@ -6,6 +6,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field
 
 from app import db
+from app.config import settings
 from app.security.web_auth import (
     SESSION_ROLE_KEY,
     SESSION_USERNAME_KEY,
@@ -33,8 +34,23 @@ def _validate_credentials_format(username: str, password: str) -> None:
         raise HTTPException(status_code=422, detail="密码至少 6 位")
 
 
+def _register_open(pool) -> bool:
+    """注册是否开放；库中尚无用户时始终放行，用于引导首个管理员（云端首次部署）。"""
+    if settings.allow_register:
+        return True
+    return not db.has_any_user(pool)
+
+
+@router.get("/config")
+def auth_config(request: Request) -> dict:
+    """公开端点：前端据此决定是否展示注册入口。"""
+    return {"allow_register": _register_open(request.app.state.pool)}
+
+
 @router.post("/register")
 def register(payload: AuthRequest, request: Request) -> dict:
+    if not _register_open(request.app.state.pool):
+        raise HTTPException(status_code=403, detail="本站已关闭注册，请联系管理员")
     _validate_credentials_format(payload.username, payload.password)
     try:
         user = db.create_user(request.app.state.pool, payload.username, payload.password)

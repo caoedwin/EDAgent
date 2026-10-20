@@ -5,6 +5,7 @@ export const useAuthStore = defineStore('auth', {
   state: () => ({
     user: null,
     ready: false, // 首次 /auth/me 是否完成
+    allowRegister: true, // 是否开放注册（由公开端点 /auth/config 决定）
   }),
   getters: {
     isLoggedIn: (state) => !!state.user,
@@ -18,6 +19,15 @@ export const useAuthStore = defineStore('auth', {
         this.user = null
       } finally {
         this.ready = true
+      }
+    },
+    async fetchAuthConfig() {
+      try {
+        const cfg = await api.get('/api/v1/auth/config')
+        this.allowRegister = !!cfg.allow_register
+      } catch {
+        // 取不到时保持宽松：仍展示入口，后端会以 403 兜底
+        this.allowRegister = true
       }
     },
     async login(username, password) {

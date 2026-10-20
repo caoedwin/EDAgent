@@ -1,6 +1,8 @@
 # EdAgent 项目文档
 
 > 本地化 AI Agent 平台：LangGraph 工作流 + RAG 知识库 + Web UI + 用户系统，全部 Docker 化运行。
+> 支持本地（容器内 Ollama）与云端（VPS + 云端 LLM API）双模式部署。
+> 最后更新：2026-10-20（新增云端部署模式与公网注册开关 `AGENT_ALLOW_REGISTER`；2026-10-15 完成 Phase 3 能力扩展：插件系统／批量导入／RAG 调参／会话标签分类／WebSocket 协作围观）。
 
 ## 1. 项目概述
 
@@ -10,13 +12,18 @@ EdAgent 是一个基于 LangGraph 的本地 AI Agent，支持：
 - **流式输出**：SSE 逐 token 打字机效果 + 思考过程展示 + 客户端中断即时取消（部分答案自动落库）
 - **用户系统**：注册 / 登录 / 会话历史持久化（Cookie Session）+ admin/user 角色 + 管理后台页面（前端 `/admin` 页面，用户列表/角色切换/删除）
 - **RAG 知识库**：按用户隔离的文档上传与检索（PDF/Word/Excel/PPTX/CSV/MD/TXT/HTML）
-- **多 Agent 协作**：「规划者 → 执行者 → 审稿者」子图处理复杂分析题（`MAX_TEAM_ROUNDS`、planner/reviewer 提示词可通过 `.env` 配置，默认 2 轮修订）
+- **多 Agent 协作**：「规划者 → 执行者 → 审稿者」子图处理复杂分析题（`AGENT_TEAM_MAX_ROUNDS` 与 planner/reviewer 提示词均可通过 `.env` 配置，默认 2 轮修订）
 - **会话置顶/搜索**：会话列表标题关键词模糊搜索 + 置顶排序
+- **会话组织**：多标签 / 单值分类 / 收藏三维度组织与筛选（标签为 JSONB 数组，支持包含查询）
+- **协作围观**：生成分享链接供他人只读围观会话，WebSocket 实时同步提问 / 思考 / 逐 token 输出与在线成员
 - **会话导出**：一键导出会话为 Markdown / HTML（含路由/思考/来源/工具调用，可打印为 PDF）
+- **能力扩展**：进程内 Python 插件（热加载 `plugins/*.py` 的 `@tool`）、批量文档导入（逐文件进度轮询）、RAG 检索调参
 - **可观测性**：Prometheus 指标 + OpenTelemetry/Jaeger 链路追踪
 - **双通道鉴权**：Web UI 走 Cookie Session，API 脚本走 Bearer API Key
+- **注册开关**：`AGENT_ALLOW_REGISTER` 控制是否开放注册（云端默认关闭）；库中无用户时始终放行以引导首个 admin
+- **双模式部署**：本地模式（容器内 Ollama 推理）与云端模式（个人 VPS + 云端 LLM API），见第 6.4 / 14.6 节
 
-LLM 默认使用容器内 Ollama（deepseek-r1:8b + nomic-embed-text），可无缝切换到在线 API（DeepSeek/OpenAI）。
+LLM 统一走 OpenAI 兼容协议：本地模式默认容器内 Ollama（deepseek-r1:8b + nomic-embed-text），云端模式默认外部 API（如 DeepSeek），仅通过环境变量切换，无需改代码。
 
 ## 2. 架构总览
 
@@ -53,10 +60,13 @@ EdAgent/
 │   ├── config.py                 #    统一配置（Settings 类，AGENT_ 前缀环境变量）
 │   ├── db.py                     #    业务数据库（pg 连接池 + 建表 + CRUD + 角色管理）
 │   ├── api/
-│   │   ├── routes.py             #    API 路由（/chat /agent /rag/*）
+│   │   ├── routes.py             #    API 路由（/chat /agent /rag/*，含 /rag/batch 批量导入）
 │   │   ├── auth_routes.py        #    认证路由（/auth/register /login /logout /me）
-│   │   ├── ui_routes.py          #    UI 路由（/ui/conversations[/export] /ui/chat/stream SSE）
+│   │   ├── ui_routes.py          #    UI 路由（会话 CRUD/组织维度/分享 + /ui/chat/stream SSE + /ui/ws 协作围观）
+│   │   ├── team_routes.py        #    Team OS 路由（团队/任务/PR/通知）
+│   │   ├── plugin_routes.py      #    插件管理路由（/plugins 列表/上传/删除，仅 admin）
 │   │   ├── admin_routes.py       #    管理路由（/admin/users 列表/改角色/删除，仅 admin）
+│   │   ├── broadcast.py          #    协作围观房间广播（进程内单例 CollaborationHub）
 │   │   └── schemas.py            #    Pydantic 请求/响应模型
 │   ├── agents/
 │   │   ├── graph.py              #    LangGraph 主图组装（router→answer/rag/react/team→report）
@@ -67,8 +77,20 @@ EdAgent/
 │   ├── llm/
 │   │   └── client.py             #    LLM 客户端（OpenAI 兼容协议，chat_invoke/ainvoke）
 │   ├── rag/
-│   │   ├── ingest.py             #    文档摄取（PDF/DOCX/XLSX/MD/TXT/HTML→分块→ChromaDB，按 owner 隔离）
-│   │   └── retriever.py          #    MMR 检索（按 user_id 过滤 owner）
+│   │   ├── ingest.py             #    文档摄取（PDF/DOCX/XLSX/PPTX/CSV/MD/TXT/HTML→分块→ChromaDB，按 owner 隔离）
+│   │   └── retriever.py          #    检索器（mmr / similarity / similarity_score_threshold，按 user_id 过滤 owner）
+│   ├── plugins/
+│   │   └── loader.py             #    进程内 Python 插件加载（扫描 /app/plugins/*.py 的 @tool）
+│   ├── team/                     #    Team OS（多角色协作子系统）
+│   │   ├── roles.py              #    角色注册表（roles/*.yaml 幂等同步到 agent_roles 表）
+│   │   ├── roles/                #    6 个角色定义（pm / product / architect / developer / tester / reviewer）
+│   │   ├── runner.py             #    团队运行器（PM 拆解 → DAG 调度 → 汇总产物）
+│   │   ├── scheduler.py          #    拓扑排序 + Semaphore 并发调度 + 人工确认阻塞
+│   │   ├── nodes.py              #    角色执行节点
+│   │   ├── patch.py              #    代码块解析 + unified diff 生成/应用
+│   │   ├── sandbox.py            #    Docker 沙箱（一次性容器编译校验，失败可降级）
+│   │   ├── templates.py          #    团队模板库（software_dev / content_creation / data_analysis）
+│   │   └── state.py              #    Team 状态定义
 │   ├── security/
 │   │   ├── auth.py               #    API Key + 密码校验基础
 │   │   ├── web_auth.py           #    Session 鉴权（request_owner_id / require_login）
@@ -94,7 +116,8 @@ EdAgent/
 │           ├── Login.vue        #    登录页
 │           ├── Register.vue     #    注册页
 │           ├── Admin.vue        #    管理后台页（用户列表/角色切换/删除，仅 admin）
-│           └── Chat.vue         #    聊天主页面（会话侧栏/SSE/Markdown/知识库抽屉）
+│           ├── Team.vue         #    团队协作页（团队/任务/PR/通知）
+│           └── Chat.vue         #    聊天主页面（会话侧栏/组织维度筛选/SSE/Markdown/知识库抽屉/协作围观）
 ├── config/                       # 基础设施配置
 │   ├── nginx.conf                #    Nginx 反向代理（SSE 关闭缓冲）
 │   ├── otel-collector.yaml       #    OTel Collector 管道配置
@@ -113,13 +136,18 @@ EdAgent/
 │   ├── observability-setup/      #    可观测性配置指南
 │   ├── docker-compose-generator/ #    Docker Compose 生成指南
 │   └── edagent-user-ui-sse/      #    用户系统+SSE+UI 排错指南
+├── plugins/                      # 进程内 Python 插件目录（bind mount 到容器 /app/plugins）
+│   └── example_plugin.py         #    示例插件（random_number）
 ├── docker-compose.yml            # 主编排文件
 ├── docker-compose.cpu.yml        # CPU 模式覆盖
 ├── docker-compose.gpu.yml        # GPU 模式覆盖
+├── docker-compose.cloud.yml      # 云端模式覆盖（去掉 Ollama，可观测组件按 profile 裁剪）
 ├── Dockerfile                    # 三阶段构建（Node→Python→Runtime）
 ├── pyproject.toml                # Python 依赖
-├── .env / .env.example           # 环境变量
-└── PROJECT.md                    # 本文件
+├── .env / .env.example           # 环境变量（本地模式）
+├── .env.cloud                    # 环境变量模板（云端模式；需填 API Key 并更换全部密钥）
+├── PROJECT.md                    # 本文件（项目权威参考文档：架构 / 配置 / Schema / API / 部署）
+└── HANDOFF.md                    # 会话交接文档（进度 / 待办 / 踩坑记录，随会话更新）
 ```
 
 ## 4. 技术栈
@@ -128,9 +156,11 @@ EdAgent/
 | --------- | -------------------------------------------- | ------------------ |
 | 后端框架      | FastAPI + uvicorn                            | ≥0.115 / workers=1 |
 | Agent 框架  | LangGraph + LangChain                        | ≥0.2 / ≥0.3        |
-| LLM 协议    | OpenAI 兼容（Ollama / DeepSeek / OpenAI）        | —                  |
-| LLM（默认）   | deepseek-r1:8b                               | Ollama             |
-| Embedding | nomic-embed-text                             | Ollama             |
+| LLM 协议    | OpenAI 兼容（Ollama / DeepSeek / 通义 / 硅基流动等）      | —                  |
+| LLM（本地模式） | deepseek-r1:8b                               | 容器内 Ollama        |
+| LLM（云端模式） | deepseek-chat（模板默认，可换任意兼容端点模型）              | 外部 API            |
+| Embedding（本地） | nomic-embed-text（768 维）                       | 容器内 Ollama        |
+| Embedding（云端） | BAAI/bge-large-zh-v1.5（1024 维，模板默认）           | 外部 API            |
 | 数据库       | PostgreSQL 16                                | psycopg3 连接池       |
 | 向量库       | ChromaDB                                     | ≥0.5               |
 | 缓存        | Redis 7.2                                    | —                  |
@@ -141,7 +171,7 @@ EdAgent/
 | Markdown  | marked + DOMPurify                           | —                  |
 | 鉴权        | Cookie Session（itsdangerous）+ Bearer API Key | —                  |
 | 密码哈希      | PBKDF2-HMAC-SHA256                           | 标准库                |
-| 容器        | Docker / Docker Compose                      | —                  |
+| 容器        | Docker / Docker Compose                      | Compose ≥v2.24     |
 | 可观测性      | Prometheus + OTel + Jaeger + Grafana         | —                  |
 
 ## 5. 配置详解
@@ -173,6 +203,8 @@ cp .env.example .env
 | `AGENT_API_KEY`        | change\_me               | Bearer API Key    |
 | `AGENT_SESSION_SECRET` | change\_me               | Cookie 签名密钥       |
 | `GRAFANA_PASSWORD`     | change\_me               | Grafana 管理员密码     |
+| **注册**                | <br />                   | <br />            |
+| `AGENT_ALLOW_REGISTER` | true                     | 是否开放注册；公网建议 false。库中尚无用户时始终放行，用于引导首个 admin |
 | **LLM**                | <br />                   | <br />            |
 | `LLM_BASE_URL`         | <http://ollama:11434/v1> | LLM API 地址        |
 | `LLM_API_KEY`          | ollama                   | LLM API Key       |
@@ -181,12 +213,19 @@ cp .env.example .env
 | `EMBEDDING_BASE_URL`   | <http://ollama:11434/v1> | Embedding API 地址  |
 | `EMBEDDING_API_KEY`    | ollama                   | Embedding API Key |
 | `EMBEDDING_MODEL`      | nomic-embed-text         | 嵌入模型              |
+| **RAG**                | <br />                   | <br />            |
+| `AGENT_RAG_SEARCH_TYPE`    | mmr                  | 检索类型：mmr / similarity / similarity_score_threshold（非法值回退 mmr） |
+| `AGENT_RAG_SCORE_THRESHOLD` | 0.0                 | 相似度分数阈值，仅 similarity_score_threshold 生效 |
 | **CPU**                | <br />                   | <br />            |
 | `OLLAMA_NUM_THREADS`   | 8                        | Ollama CPU 线程数    |
-| **多 Agent 协作**       | <br />                   | <br />            |
+| **多 Agent 协作 / Team OS** | <br />              | <br />            |
 | `AGENT_TEAM_MAX_ROUNDS`    | 2                     | 多 Agent 协作审稿最大轮次 |
 | `AGENT_TEAM_PLANNER_PROMPT`  | (留空用默认)         | 规划者提示词         |
 | `AGENT_TEAM_REVIEWER_PROMPT` | (留空用默认)         | 审稿者提示词         |
+| `AGENT_TEAM_MAX_PARALLEL`    | 2                  | Team OS 并发执行的任务数 |
+| `AGENT_TEAM_SANDBOX_ENABLED` | true               | 是否启用 Docker 沙箱验证 |
+| `AGENT_TEAM_SANDBOX_IMAGE`   | edagent-agent-api:0.1.0 | 沙箱执行镜像       |
+| `AGENT_TEAM_SANDBOX_TIMEOUT` | 120                | 沙箱执行超时（秒）      |
 
 ### 5.2 Settings 类（app/config.py）
 
@@ -204,14 +243,17 @@ class Settings(BaseSettings):
     database_url / redis_url / chroma_url / collection_name / ingest_dir
     # Agent
     max_agent_steps: 15
-    # 多 Agent 协作
+    # 多 Agent 协作 / Team OS
     team_max_rounds: int = 2 / team_planner_prompt: str / team_reviewer_prompt: str
+    team_max_parallel: int = 2 / team_sandbox_enabled: bool = True
+    team_sandbox_image: str / team_sandbox_timeout: int = 120
     # RAG
     rag_chunk_size: 512 / rag_chunk_overlap: 50 / rag_top_k: 5 / rag_mmr_lambda_mult: 0.5
+    rag_search_type: str = "mmr" / rag_score_threshold: float = 0.0
     # 可观测性
-    otel_exporter_otlp_endpoint / otel_service_name
+    otel_exporter_otlp_endpoint（空值则不向 collector 导出）/ otel_service_name
     # 安全
-    api_key / session_secret / session_max_age_seconds (7天) / static_dir
+    api_key / session_secret / session_max_age_seconds (7天) / allow_register / static_dir
 ```
 
 ### 5.3 Secrets
@@ -259,6 +301,27 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 
 CPU 覆盖文件设置 `OLLAMA_NUM_THREADS`、`OLLAMA_NUM_PARALLEL` 等参数。
 
+### 6.4 云端模式 override（docker-compose.cloud.yml）
+
+个人 VPS + 云端 LLM API 场景（不在容器内跑 Ollama），在基础编排文件之上叠加 override 文件：
+
+```bash
+# 云端模式（必须带 --env-file，否则会读到本地 .env）
+docker compose --env-file .env.cloud -f docker-compose.yml -f docker-compose.cloud.yml up -d
+
+# 本地模式命令不变
+docker compose -f docker-compose.yml -f docker-compose.cpu.yml up -d
+```
+
+- **依赖版本**：Docker Compose v2.24+（override 文件用 `!override` / `!reset` 标签做字段整体替换，而非默认的字段合并）
+- **默认不启动的服务**：`ollama` 用 `profiles: ["local-only"]`；`otel-collector` / `jaeger` / `prometheus` / `grafana` 用 `profiles: ["observability"]`（需要排障时追加 `--profile observability` 启用）
+- **agent-api 覆盖**：
+  - `depends_on` 用 `!override` 去掉 ollama 依赖，只保留 chroma/postgres/redis
+  - 环境变量：`AGENT_OTEL_EXPORTER_OTLP_ENDPOINT=""`（空值短路，不向 collector 导出）、`AGENT_COLLECTION_NAME=agent_edagent_cloud`（换 embedding 模型后向量维度变化，必须换新 collection）、`AGENT_TEAM_SANDBOX_ENABLED=false`
+  - `volumes` 用 `!override` **移除 docker.sock 挂载**（沙箱随之禁用，最小化攻击面）、`group_add: !reset []`
+- **nginx 覆盖**：`ports` 用 `!override` 改为 `${NGINX_HOST_PORT:-80}:80`（对公网暴露；基础文件里绑定的是 127.0.0.1）
+- **TLS**：`config/nginx.conf` 目前只 listen 80，配置域名后需自行加 443 + 证书
+
 ## 7. 数据库 Schema
 
 复用同一个 PostgreSQL 实例，业务表与 LangGraph checkpoints 表并存。
@@ -277,13 +340,21 @@ CREATE TABLE users (
 
 -- 会话
 CREATE TABLE conversations (
-    id         UUID PRIMARY KEY,
-    user_id    BIGINT REFERENCES users(id) ON DELETE CASCADE,
-    title      VARCHAR(100),
-    thread_id  VARCHAR(80) UNIQUE,          -- 对应 LangGraph thread_id
-    created_at TIMESTAMPTZ DEFAULT now(),
-    updated_at TIMESTAMPTZ DEFAULT now()
+    id          UUID PRIMARY KEY,
+    user_id     BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    title       VARCHAR(100),
+    thread_id   VARCHAR(80) UNIQUE,             -- 对应 LangGraph thread_id
+    pinned      BOOLEAN NOT NULL DEFAULT FALSE, -- 置顶
+    tags        JSONB NOT NULL DEFAULT '[]',    -- 多标签（jsonb 数组）
+    category    VARCHAR(32),                    -- 单值分类（可空）
+    favorite    BOOLEAN NOT NULL DEFAULT FALSE, -- 收藏
+    share_token VARCHAR(40),                    -- 协作围观分享 token（为空=未开启）
+    created_at  TIMESTAMPTZ DEFAULT now(),
+    updated_at  TIMESTAMPTZ DEFAULT now()
 );
+-- 部分唯一索引：仅对已开启分享的会话保证 token 唯一
+CREATE UNIQUE INDEX idx_conversations_share_token
+    ON conversations(share_token) WHERE share_token IS NOT NULL;
 
 -- 消息
 CREATE TABLE messages (
@@ -343,7 +414,20 @@ CREATE TABLE notifications (
     type VARCHAR(32),                  -- task_blocked/task_failed/team_done
     title VARCHAR(200), body TEXT, is_read BOOLEAN DEFAULT FALSE
 );
+
+-- ==================== 批量导入 ====================
+-- 批量导入任务：逐文件状态记在 results(JSONB)，供前端轮询进度
+CREATE TABLE ingest_jobs (
+    id UUID PRIMARY KEY, user_id BIGINT REFERENCES users(id) ON DELETE CASCADE,
+    status VARCHAR(16) DEFAULT 'running',        -- running/done/failed
+    total_files INT NOT NULL, completed_files INT DEFAULT 0, failed_files INT DEFAULT 0,
+    results JSONB DEFAULT '[]',                  -- 逐文件状态（文件名/成功/错误）
+    created_at TIMESTAMPTZ DEFAULT now(), updated_at TIMESTAMPTZ DEFAULT now()
+);
 ```
+
+> `conversations` 的 `pinned` / `tags` / `category` / `favorite` / `share_token` 均为老库升级列，
+> 由 `app/db.py` 初始化流程中的幂等 `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` 迁移补齐（含上述部分唯一索引）。
 
 ### 7.2 LangGraph 检查点表
 
@@ -389,7 +473,8 @@ START → router
 
 | 方法   | 路径        | 鉴权 | 说明                                      |
 | ---- | --------- | -- | --------------------------------------- |
-| POST | /register | 公开 | 注册（用户名3-32字符，密码≥6）；**首个注册用户自动成为 admin** |
+| POST | /register | 公开 | 注册（用户名3-32字符，密码≥6）；**首个注册用户自动成为 admin**；`AGENT_ALLOW_REGISTER=false` 时返回 403（库中无用户时仍放行） |
+| GET  | /config   | 公开 | 前端据此决定是否展示注册入口，返回 `{allow_register}` |
 | POST | /login    | 公开 | 登录（写 Session Cookie）                    |
 | POST | /logout   | 登录 | 登出（清除 Session）                          |
 | GET  | /me       | 登录 | 获取当前用户（含 role）                          |
@@ -406,6 +491,18 @@ START → router
 | DELETE | /conversations/{id}        | 登录 | 删除会话（隔离校验）                        |
 | PATCH  | /conversations/{id}        | 登录 | 重命名会话                             |
 | POST   | /chat/stream               | 登录 | **SSE 流式聊天**（客户端断连即取消执行，部分答案自动落库） |
+| GET    | /conversations?tag=&category=&favorite= | 登录 | 组合筛选（tag 走 jsonb 包含；`favorite=1` 仅收藏；可与 `q` 组合） |
+| GET    | /conversation-filters      | 登录 | 聚合当前用户用过的分类与标签及其计数（供筛选下拉） |
+| PATCH  | /conversations/{id}/meta   | 登录 | 局部更新组织维度（tags/category/favorite，**只改请求体显式出现的字段**） |
+| GET    | /conversations/{id}/share  | 登录 | 读取分享状态                                  |
+| POST   | /conversations/{id}/share  | 登录 | 开启协作围观，返回 `{ok, enabled, share_token, share_url, viewers}` |
+| DELETE | /conversations/{id}/share  | 登录 | 关闭分享（清空 token）并**强制解散**已打开的围观连接        |
+| GET    | /shared/{share_token}      | 登录 | 只读读取共享会话及其消息（返回 `shared: true` 与 `owner_username`） |
+| WS     | /ws/{share_token}          | 登录 | 协作围观 WebSocket（只读）                       |
+
+`PATCH /conversations/{id}/meta` 请求体的 `tags` / `category` / `favorite` 三者均可选，只更新请求体中显式出现的字段（`tags: []` 清空标签，`category: ""` 清空分类）；`POST .../share` 返回的 `share_url` 形如 `/?c=<id>&share=<token>`。
+
+**协作围观 WebSocket（`/ws/{share_token}`）**：事件顺序为 `history` → `presence` / `join` / `leave` → `turn_start` → `reasoning` / `token` → `turn_done` / `turn_error`。鉴权失败时先 `accept` 再推 `error` 事件并 `close(code=4401)`（未登录）/ `4404`（链接无效或已关闭）。只读房间：客户端上行消息被忽略（仅响应心跳）。
 
 ### 9.3 API / Agent（/api/v1）
 
@@ -417,6 +514,11 @@ START → router
 | DELETE | /rag/documents/{source} | 双通道     | 删除文档                         |
 | GET    | /rag/stats              | 双通道     | 知识库统计                        |
 | POST   | /rag/query              | 双通道     | RAG 检索/问答                    |
+| POST   | /rag/batch              | 双通道     | 批量上传（≤20 文件），后台 `asyncio.create_task` + `Semaphore(2)` 限流 |
+| GET    | /rag/batch/{job_id}     | 双通道     | 轮询批量导入进度（逐文件状态）                  |
+| GET    | /plugins                | admin   | 插件列表（进程内 Python 插件）               |
+| POST   | /plugins                | admin   | 上传插件（限 `.py`、≤1MB；上传后需重启 agent-api 生效） |
+| DELETE | /plugins/{name}         | admin   | 删除插件（删除后需重启 agent-api 生效）          |
 | GET    | /health                 | 公开      | 健康检查                         |
 | GET    | /metrics                | 公开      | Prometheus 指标                |
 
@@ -490,7 +592,7 @@ Team OS 是一个**独立于主 Agent 图**的子系统：PM 把目标拆成 WBS
 
 洋葱模型（后 add 更靠外）：OTel → Session → Security → 路由
 
-- Security 中间件仅拦截 `/api/` 开头且不在公开白名单 `{/auth/register, /auth/login}` 的请求
+- Security 中间件仅拦截 `/api/` 开头且不在公开白名单 `{/auth/register, /auth/login, /auth/config}` 的请求
 - Session 中间件（itsdangerous）签名 Cookie，`same_site=lax`，`https_only=False`（本地 HTTP）
 
 ## 11. RAG 系统
@@ -549,6 +651,14 @@ npm run dev  # Vite dev server，proxy /api → localhost:18080
 ```
 
 > Windows 本地 Node 仅为 v16 时，前端只在 Docker 内构建，不依赖本地 node。
+
+### 12.5 会话组织与协作围观（Chat.vue）
+
+- **侧栏筛选**：「全部 / 收藏」单选 + 「按分类 / 按标签」两个下拉（选项来自 `GET /conversation-filters`）
+- **会话行**：显示分类 / 标签徽标 + 收藏星标 + 分享标记，加「更多」菜单（收藏、标签分类、分享协作室、导出 MD/HTML/PDF、删除）
+- **编辑弹窗**：「标签 / 分类」编辑（分类单选 + 标签多选 allow-create）
+- **分享协作室弹窗**：只读链接 + 复制按钮 + 在线人数轮询 + 开启/关闭分享
+- **协作围观视图**：只读（无输入框，底部只读提示条），顶部在线成员头像与「N 人在线」；WS 客户端 25s 心跳，按 44xx 关闭码提示。**在线成员按用户 id 去重**（同一账号多标签页只算 1 人）
 
 ## 13. 可观测性
 
@@ -767,6 +877,23 @@ edagent-backup/
 # 其余恢复步骤同上，跳过 ollama_data 恢复即可
 ```
 
+### 14.6 云端模式部署（VPS + 云端 LLM API）
+
+适用场景：个人使用、服务器无 GPU、不想在本地跑模型。
+
+1. **生成新密钥**（不要沿用本地 `.env` 的值）：PowerShell 示例 `-join ((48..57)+(97..122) | Get-Random -Count 24 | % {[char]$_})`，填入 `.env.cloud`。
+2. **填 LLM / Embedding API Key**：模板里默认 DeepSeek（LLM）+ 硅基流动（Embedding）示例；也可全用硅基流动一个 key 通吃（LLM 用 Qwen / DeepSeek 系列）。
+3. **项目目录传到 VPS**（不要带本地 `.env`；`.env.cloud` 含密钥，勿提交仓库）。
+4. **启动**：`docker compose --env-file .env.cloud -f docker-compose.yml -f docker-compose.cloud.yml up -d`。
+5. **安全组只放行 80**（配 TLS 后加 443），其余端口一律不要对外；数据库等用 SSH 隧道访问。
+
+必读注意：
+
+- **换 embedding 模型会改变向量维度，旧知识库向量失效**：compose 已自动换成 `agent_edagent_cloud` collection，首次启动后需重新导入文档。
+- **云端是空数据库**：首个注册者自动成为 admin。
+- **注册开关默认关闭**（`.env.cloud` 的 `AGENT_ALLOW_REGISTER=false`）：即便关闭注册，库中无用户时仍会放行以引导首个管理员，**注册成功后该入口自动失效**；后续新增账号可在管理后台由 admin 创建/管理。
+- 本地容器内 Ollama 与在线 LLM 的切换见 14.3「切换到在线 LLM」，此处不重复。
+
 ## 15. 开发常用命令
 
 ```bash
@@ -832,13 +959,21 @@ docker compose -f docker-compose.yml down -v
 python-pptx + csv 解析）、导出格式扩展（Markdown / HTML / 打印为 PDF）、协作小组
 可配置（`AGENT_TEAM_MAX_ROUNDS` 及 planner/reviewer 提示词通过 `.env` 配置）。
 
+Team OS（多角色协作子系统）阶段 1-3 已于 2026-10-13 实现（角色注册表 / DAG 并发调度 /
+PR 补丁 / Docker 沙箱 / 多团队隔离 / 通知系统 / 模板库），见第 9.6 节与第 7.1 节。
+
+Phase 3 能力扩展已于 2026-10-15 完成并验证：插件系统（进程内 Python 插件 + `GET/POST/DELETE /api/v1/plugins`）、
+批量文档导入（`POST /api/v1/rag/batch` + `ingest_jobs` 表 + 并发限流）、RAG 检索调参
+（`rag_search_type` / `rag_score_threshold`）、会话标签分类（tags/category/favorite + 筛选端点）、
+WebSocket 实时多用户协作（只读围观 + `share_token`）。
+
+2026-10-19 新增云端部署模式（个人 VPS + 云端 LLM API，`docker-compose.cloud.yml` override + `.env.cloud`，见 6.4 / 14.6 节）。
+
+2026-10-20 新增公网注册开关（`AGENT_ALLOW_REGISTER`，云端默认关闭；库中无用户时放行以引导首个 admin，见 5.1 / 9.1 / 10.2 节）。
+
 下一批候选：
 
-- **模型微调或 RAG 调优**：Ollama Modelfile 自定义微调，或调整分块/检索参数提升命中率
-- **会话标签分类**：多维度标签组织会话（项目/主题/时间等）
-- **批量文档导入**：支持文件夹整体上传与并发摄取
-- **WebSocket 实时多用户协作**：多端共享会话、消息实时同步
-- **插件系统**：自定义工具扩展（动态加载外部 Tool）
+- **模型微调或 RAG 调优**：Ollama Modelfile 自定义微调，或升级到更大参数模型（如 qwen2.5:14b）提升命中率
 - **多语言界面（i18n）**：中英文等多语言切换
 - **Team OS 产品化**：角色可视化管理页（自定义 system_prompt/工具白名单）、任务 DAG 图形化展示、
   产物版本 diff 对比、通知 Webhook/邮件外发、团队运行成本与耗时统计

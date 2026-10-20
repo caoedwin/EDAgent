@@ -46,6 +46,8 @@ services:
       AGENT_COLLECTION_NAME: agent_edagent_cloud
       # 云端不挂 docker.sock，Team OS 的 Docker 沙箱随之禁用（攻击面最小化）
       AGENT_TEAM_SANDBOX_ENABLED: "false"
+      # 关闭公开注册（默认 false，比基础文件更安全）；如需临时开放，在 .env.cloud 写 AGENT_ALLOW_REGISTER=true
+      AGENT_ALLOW_REGISTER: ${AGENT_ALLOW_REGISTER:-false}
       # LLM / Embedding 的 BASE_URL/API_KEY/MODEL 由 .env.cloud 插值注入，无需在此覆盖
     volumes: !override
       - ingest_data:/data/ingest

@@ -85,6 +85,8 @@ class Settings(BaseSettings):
     # Web UI 登录会话 Cookie 签名密钥（生产环境必须通过 AGENT_SESSION_SECRET 覆盖）
     session_secret: SecretStr = SecretStr("edagent-dev-session-secret-change-me")
     session_max_age_seconds: int = 7 * 24 * 3600
+    # 是否开放注册（公网部署建议关闭；库中尚无任何用户时始终放行，用于引导首个 admin）
+    allow_register: bool = True
     # SPA 静态文件目录（Docker 构建时由前端产物填充）
     static_dir: str = "/app/static"
 

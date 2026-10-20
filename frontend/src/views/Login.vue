@@ -41,7 +41,10 @@
       </el-form>
 
       <p class="switch-tip">
-        还没有账号？<router-link to="/register">立即注册</router-link>
+        <template v-if="auth.allowRegister">
+          还没有账号？<router-link to="/register">立即注册</router-link>
+        </template>
+        <template v-else>本站已关闭注册，请联系管理员开通账号</template>
       </p>
     </div>
   </div>

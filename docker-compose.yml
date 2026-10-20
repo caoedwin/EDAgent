@@ -143,6 +143,8 @@ services:
       AGENT_API_KEY: ${AGENT_API_KEY}
       AGENT_SESSION_SECRET: ${AGENT_SESSION_SECRET}
       AGENT_MAX_AGENT_STEPS: "15"
+      # 是否开放注册：公网部署务必置 false（库中无用户时仍放行，用于引导首个 admin）
+      AGENT_ALLOW_REGISTER: ${AGENT_ALLOW_REGISTER:-true}
       # Team OS：CPU 下 Ollama 单槽推理，并发任务会在服务端排队进而超时，CPU 建议串行
       AGENT_TEAM_MAX_PARALLEL: ${TEAM_MAX_PARALLEL:-2}
       AGENT_ENV: production
